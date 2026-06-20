@@ -1,0 +1,17 @@
+# build artifacts
+bin/
+/oss-agent
+/linbit-agent
+
+# runtime data (cortexdb knowledge base + agent memory)
+data/
+*.db
+
+# cloned source repos analyzed into the graph
+repos/
+
+# vendored external tooling (Understand-Anything: installed separately)
+skills/
+
+# misc
+.DS_Store
