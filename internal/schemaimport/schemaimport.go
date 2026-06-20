@@ -1,23 +1,19 @@
-// Package schemaimport extracts a precise object model from a SQL schema (DDL):
-// CREATE TABLE → entity, FOREIGN KEY … REFERENCES → relation. Deterministic, no
-// LLM — the database schema *is* the ground-truth ontology. Product-agnostic:
-// point it at any project's schema.
+// Package schemaimport extracts a precise object model from a SQL schema (DDL)
+// into the knowledge graph: CREATE TABLE → entity, FOREIGN KEY → relation.
+// Deterministic, no LLM — the database schema *is* the ground-truth ontology.
+// Parsing is delegated to cortexdb's importflow.ParseDDL (a maintained
+// Postgres/MySQL DDL parser) rather than a bespoke regex. Product-agnostic.
 package schemaimport
 
 import (
 	"context"
 	"fmt"
 	"os"
-	"regexp"
 	"strings"
 
-	"github.com/liliang-cn/oss-agent/internal/knowledge"
-)
+	"github.com/liliang-cn/cortexdb/v2/pkg/importflow"
 
-var (
-	reTable = regexp.MustCompile(`(?is)CREATE TABLE\s+` + "`?" + `(\w+)` + "`?" + `\s*\((.*?)\)\s*;`)
-	reFK    = regexp.MustCompile(`(?is)ALTER TABLE\s+` + "`?" + `(\w+)` + "`?" + `\s+ADD CONSTRAINT\s+\w+\s+FOREIGN KEY\s*\([^)]*\)\s*REFERENCES\s+` + "`?" + `(\w+)`)
-	reSkip  = regexp.MustCompile(`(?i)^\s*(CONSTRAINT|PRIMARY|FOREIGN|UNIQUE|CHECK|KEY)\b`)
+	"github.com/liliang-cn/oss-agent/internal/knowledge"
 )
 
 // Stats summarizes an import.
@@ -34,33 +30,37 @@ func Import(ctx context.Context, store *knowledge.Store, path string) (Stats, er
 	if err != nil {
 		return st, fmt.Errorf("read %s: %w", path, err)
 	}
-	sql := string(b)
+	tables, err := importflow.ParseDDL(string(b))
+	if err != nil {
+		return st, fmt.Errorf("parse DDL: %w", err)
+	}
 
 	docID := "schema:" + baseName(path)
 	known := map[string]string{} // upper table name -> entity id
 	var ents []knowledge.GraphEntity
 	batch := map[string]string{}
 
-	for _, m := range reTable.FindAllStringSubmatch(sql, -1) {
-		name := m[1]
-		id := "table:" + strings.ToLower(name)
-		cols := columnsOf(m[2])
-		desc := "DB table " + name
+	for _, t := range tables {
+		id := "table:" + strings.ToLower(t.Name)
+		cols := make([]string, 0, len(t.Columns))
+		for _, c := range t.Columns {
+			cols = append(cols, c.Name)
+		}
+		desc := "DB table " + t.Name
 		if len(cols) > 0 {
 			desc += " — columns: " + strings.Join(cols, ", ")
 		}
-		known[strings.ToUpper(name)] = id
+		known[strings.ToUpper(t.Name)] = id
 		ents = append(ents, knowledge.GraphEntity{
-			ID: id, Name: name, Type: "Table", Description: desc, ChunkIDs: []string{id},
+			ID: id, Name: t.Name, Type: "Table", Description: desc, ChunkIDs: []string{id},
 		})
-		batch[id] = name + "\n" + desc
+		batch[id] = t.Name + "\n" + desc
 		st.Tables++
 	}
 	if st.Tables == 0 {
 		return st, fmt.Errorf("no CREATE TABLE statements found in %s", path)
 	}
 
-	// embed entity text (so the schema is searchable) then upsert nodes
 	if err := store.EmbedBatch(ctx, batch, map[string]string{"document_id": docID, "source": "schema"}); err != nil {
 		return st, fmt.Errorf("embed: %w", err)
 	}
@@ -69,39 +69,21 @@ func Import(ctx context.Context, store *knowledge.Store, path string) (Stats, er
 	}
 
 	var rels []knowledge.GraphRelation
-	for _, m := range reFK.FindAllStringSubmatch(sql, -1) {
-		from, ok1 := known[strings.ToUpper(m[1])]
-		to, ok2 := known[strings.ToUpper(m[2])]
-		if !ok1 || !ok2 || from == to {
-			continue
+	for _, t := range tables {
+		from := known[strings.ToUpper(t.Name)]
+		for _, fk := range t.ForeignKeys {
+			to, ok := known[strings.ToUpper(fk.RefTable)]
+			if !ok || to == from {
+				continue
+			}
+			rels = append(rels, knowledge.GraphRelation{From: from, To: to, Type: "REFERENCES"})
+			st.FKs++
 		}
-		rels = append(rels, knowledge.GraphRelation{From: from, To: to, Type: "REFERENCES"})
-		st.FKs++
 	}
 	if err := store.UpsertRelations(ctx, docID, rels); err != nil {
 		return st, fmt.Errorf("upsert foreign keys: %w", err)
 	}
 	return st, nil
-}
-
-// columnsOf pulls column names from a CREATE TABLE body (skipping constraints).
-func columnsOf(body string) []string {
-	var cols []string
-	for _, line := range strings.Split(body, "\n") {
-		line = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(line), ","))
-		if line == "" || reSkip.MatchString(line) {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) == 0 {
-			continue
-		}
-		name := strings.Trim(fields[0], "`\"")
-		if name != "" && len(cols) < 24 {
-			cols = append(cols, name)
-		}
-	}
-	return cols
 }
 
 func baseName(path string) string {

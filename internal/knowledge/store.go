@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"unicode"
 
 	"github.com/liliang-cn/cortexdb/v2/pkg/cortexdb"
 
@@ -143,7 +142,7 @@ func (s *Store) SearchGraph(ctx context.Context, query string, topK int) (*Graph
 		}
 		res.Hits = append(res.Hits, Hit{DocumentID: docID, Content: r.Content, Score: r.Score})
 		if r.ID != "" {
-			eid := graphEntityID(r.ID)
+			eid := cortexdb.EntityNodeID(r.ID)
 			if _, dup := seedSet[eid]; !dup {
 				seeds = append(seeds, eid)
 				seedSet[eid] = struct{}{}
@@ -236,7 +235,7 @@ func (s *Store) PurgeSource(ctx context.Context, docMatch string, prefix bool) (
 			return 0, 0, scanErr
 		}
 		embIDs = append(embIDs, id)
-		nodeSet[graphEntityID(id)] = struct{}{}
+		nodeSet[cortexdb.EntityNodeID(id)] = struct{}{}
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
@@ -358,7 +357,7 @@ func (s *Store) QueryGraph(ctx context.Context, query string, topK int) (*GraphV
 	seedSet := make(map[string]struct{})
 	for _, r := range results { // vector hits → code entities
 		if r.ID != "" {
-			seedSet[graphEntityID(r.ID)] = struct{}{}
+			seedSet[cortexdb.EntityNodeID(r.ID)] = struct{}{}
 		}
 	}
 	// Also seed by graph-node name: domain-concept entities (from LLM ontology
@@ -499,30 +498,6 @@ func (s *Store) RecallTurns(ctx context.Context, query string, topK int) ([]Conv
 		out = append(out, ConvTurn{Role: h.Memory.Role, Content: h.Memory.Content, SessionID: sid, Score: h.Score})
 	}
 	return out, nil
-}
-
-// graphEntityID mirrors cortexdb's graphEntityNodeID: lowercase, keep letters and
-// digits, map space/-/_ to '_', drop everything else, prefix "entity:". This lets
-// us turn a raw chunk/node id into the normalized id under which the graph stores
-// the corresponding entity node.
-func graphEntityID(raw string) string {
-	if strings.HasPrefix(raw, "entity:") {
-		return raw
-	}
-	var b strings.Builder
-	for _, r := range strings.ToLower(strings.TrimSpace(raw)) {
-		switch {
-		case unicode.IsLetter(r) || unicode.IsDigit(r):
-			b.WriteRune(r)
-		case r == ' ' || r == '-' || r == '_':
-			b.WriteByte('_')
-		}
-	}
-	id := strings.Trim(b.String(), "_")
-	if id == "" {
-		id = "entity"
-	}
-	return "entity:" + id
 }
 
 // chunk splits text into ~size-byte passages on line boundaries.
