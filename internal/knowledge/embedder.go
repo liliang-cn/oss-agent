@@ -46,8 +46,35 @@ func (e *OpenAIEmbedder) Embed(ctx context.Context, text string) ([]float32, err
 	return vs[0], nil
 }
 
-// EmbedBatch embeds multiple texts in one request.
+// maxRequestBatch caps how many texts go in one /embeddings request. Some
+// providers (e.g. DashScope text-embedding-v4) reject batches larger than ~10,
+// while ollama accepts any size; sub-batching keeps both happy. Callers may pass
+// arbitrarily large batches and this splits them transparently.
+const maxRequestBatch = 10
+
+// EmbedBatch embeds multiple texts, splitting into provider-safe sub-batches and
+// preserving input order.
 func (e *OpenAIEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	if len(texts) <= maxRequestBatch {
+		return e.embedOnce(ctx, texts)
+	}
+	out := make([][]float32, 0, len(texts))
+	for start := 0; start < len(texts); start += maxRequestBatch {
+		end := start + maxRequestBatch
+		if end > len(texts) {
+			end = len(texts)
+		}
+		vs, err := e.embedOnce(ctx, texts[start:end])
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, vs...)
+	}
+	return out, nil
+}
+
+// embedOnce sends a single /embeddings request for up to maxRequestBatch texts.
+func (e *OpenAIEmbedder) embedOnce(ctx context.Context, texts []string) ([][]float32, error) {
 	body, _ := json.Marshal(map[string]interface{}{"model": e.model, "input": texts})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, e.baseURL+"/embeddings", bytes.NewReader(body))
 	if err != nil {
