@@ -39,7 +39,19 @@ export OSS_UNDERSTAND_CMD='claude -p "/understand ." --dangerously-skip-permissi
 
 ## 1. Write `domain.toml` (the only product-specific input)
 
-Copy `examples/linbit/domain.toml` and edit. Fields:
+**Fast start — let the LLM draft it:**
+
+```bash
+oss-agent init https://github.com/<org>/<repo>   # clone + LLM → domain.generated.toml
+```
+
+`init` inspects the repo (README, top-level layout, dominant languages) and drafts
+`name`/`title`/`persona`, the `entity_types`/`relation_types` vocabulary,
+`error_patterns`, candidate `probes`, and candidate `red_lines`. **You MUST review
+the draft** — especially `[[red_lines]]` (the destructive-command safety wall) and
+`[[probes]]` (commands the agent may run) — then `cp domain.generated.toml domain.toml`.
+
+**Or by hand:** copy `examples/linbit/domain.toml` and edit. Fields:
 
 | field | meaning |
 |---|---|
@@ -64,7 +76,15 @@ object model) and **semantic vectors** (for retrieval).
 
 ```bash
 oss-agent ingest-repo https://github.com/<org>/<repo>      # clone → /understand → import-graph
-# (re-running understand on huge repos can stall; if so, merge intermediate/batch-*.json — see worklog)
+```
+
+If `/understand` stalls on a huge repo (no final `knowledge-graph.json`),
+`ingest-repo` now **auto-salvages**: it merges the intermediate batches
+(`assembled-graph.json` + `batch-*.json` + layers) into an equivalent graph and
+imports that. To redo it explicitly on an existing clone:
+
+```bash
+oss-agent salvage repos/<repo>     # rebuild + import from intermediate batches, no re-run
 ```
 
 **b) Docs / KB / blog → semantic vectors** (point at a dir of .md/.adoc):
@@ -77,11 +97,20 @@ oss-agent ingest-repo repos/<docs-dir>     # no knowledge-graph.json → text/se
 source the project ships — this is the precise ontology, don't mine it from prose:
 
 ```bash
-oss-agent import-schema path/to/schema.sql     # CREATE TABLE → entity, FOREIGN KEY → relation
+oss-agent import-model path/to/source     # auto-detects format → entities + REFERENCES
 ```
 
-> Adapter set: SQL schema (`import-schema`) today. Protobuf / OpenAPI / C-struct
-> are the same idea — parse the structured source, not the docs. (planned)
+> Adapters (pick the one matching the project's source-of-truth):
+> | source | extension | maps to |
+> |---|---|---|
+> | SQL DDL | `.sql` | `CREATE TABLE` → entity, `FOREIGN KEY` → relation |
+> | Protobuf | `.proto` | `message` → entity, message-typed field → relation |
+> | OpenAPI / Swagger | `.yaml` `.yml` `.json` | `components.schemas` → entity, `$ref` → relation |
+> | C/C++ struct | `.h` `.hpp` `.c` `.cc` `.cpp` | `struct` → entity, struct-typed field → relation |
+>
+> `import-schema` remains as the SQL-only alias; `import-model` covers all of the
+> above (and routes `.sql` to the same parser). For a project with no SQL — e.g.
+> DRBD (C) — point `import-model` at its core header(s) or `.proto`.
 
 **d) Verify:**
 
@@ -218,9 +247,12 @@ make push-db HOST=<host>    # ship a freshly rebuilt knowledge.db
 
 ## What's standardized vs per-project
 
-- **Fully automatic, any project**: code→graph (`ingest-repo`), docs→vectors,
-  `serve`, the agent itself (domain.toml-driven), deploy (`make deploy`).
+- **Fully automatic, any project**: code→graph (`ingest-repo`, auto-salvages a
+  stalled understand run), docs→vectors, `serve`, the agent itself
+  (domain.toml-driven), deploy (`make deploy`).
 - **Finite adapters, pick one**: object-model extraction from a structured source
-  (`import-schema`; proto/OpenAPI planned).
-- **Irreducible human input**: authoring `domain.toml` (persona + red-lines) and
-  choosing the schema source. Everything else is the pipeline above.
+  (`import-model`: SQL / proto / OpenAPI / C-struct).
+- **LLM-assisted, human-reviewed**: drafting `domain.toml` (`oss-agent init`).
+- **Irreducible human input**: reviewing/owning the `domain.toml` — above all the
+  `red_lines` safety wall — and choosing which structured source is the object
+  model. Everything else is the pipeline above.

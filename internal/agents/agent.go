@@ -23,6 +23,16 @@ import (
 	"github.com/liliang-cn/oss-agent/internal/safety"
 )
 
+// LLM builds a bare LLM generator from config (used by scaffolding/extraction
+// paths that need raw generation without the full agent service).
+func LLM(cfg config.Config) (agdomain.Generator, error) {
+	return providers.NewOpenAILLMProvider(&agdomain.OpenAIProviderConfig{
+		BaseURL:  cfg.LLMBaseURL,
+		APIKey:   cfg.LLMAPIKey,
+		LLMModel: cfg.LLMModel,
+	})
+}
+
 // BuildExtractor returns an LLM ontology extractor for the domain, or nil if no
 // LLM key is configured (ingestion then stores vectors without graph extraction).
 func BuildExtractor(cfg config.Config, dom *domain.Domain) *extract.Extractor {
@@ -123,8 +133,8 @@ func registerKnowledgeSearch(svc *agent.Service, store *knowledge.Store) {
 				return map[string]interface{}{"ok": false, "error": err.Error()}, nil
 			}
 			return map[string]interface{}{
-				"ok":               true,
-				"hits":             gr.Hits,
+				"ok":                true,
+				"hits":              gr.Hits,
 				"related_via_graph": gr.Neighbors,
 			}, nil
 		})

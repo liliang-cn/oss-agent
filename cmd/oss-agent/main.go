@@ -32,7 +32,10 @@ import (
 	"github.com/liliang-cn/oss-agent/internal/ingest"
 	"github.com/liliang-cn/oss-agent/internal/knowledge"
 	"github.com/liliang-cn/oss-agent/internal/loganalyze"
+	"github.com/liliang-cn/oss-agent/internal/objectmodel"
 	"github.com/liliang-cn/oss-agent/internal/safety"
+	"github.com/liliang-cn/oss-agent/internal/salvage"
+	"github.com/liliang-cn/oss-agent/internal/scaffold"
 	"github.com/liliang-cn/oss-agent/internal/schemaimport"
 )
 
@@ -56,6 +59,12 @@ func main() {
 		runImportGraph(strings.Join(os.Args[2:], " "))
 	case "import-schema":
 		runImportSchema(strings.Join(os.Args[2:], " "))
+	case "import-model":
+		runImportModel(strings.Join(os.Args[2:], " "))
+	case "salvage":
+		runSalvage(strings.Join(os.Args[2:], " "))
+	case "init":
+		runInit(strings.Join(os.Args[2:], " "))
 	case "search":
 		runSearch(strings.Join(os.Args[2:], " "))
 	case "search-graph":
@@ -202,6 +211,23 @@ func runIngestRepo(arg string) {
 		}
 		fmt.Printf("[3/3] imported graph — %d nodes, %d edges into %s\n", st.Nodes, st.Edges, cfg.KnowledgeDBPath)
 		return
+	}
+
+	// 3a'. salvage: understand stalled before writing knowledge-graph.json, but
+	// left intermediate batches — merge them into an equivalent graph and import.
+	if salvage.Available(dir) {
+		fmt.Println("[3/3] no knowledge-graph.json — salvaging from intermediate batches")
+		merged, ss, e := salvage.Salvage(dir)
+		if e == nil {
+			fmt.Printf("  salvaged %d nodes, %d edges, %d layers from %s\n", ss.Nodes, ss.Edges, ss.Layers, strings.Join(ss.Sources, ", "))
+			st, e2 := graphimport.Import(ctx, store, merged)
+			if e2 != nil {
+				fail("import salvaged graph: %v", e2)
+			}
+			fmt.Printf("  imported salvaged graph — %d nodes, %d edges into %s\n", st.Nodes, st.Edges, cfg.KnowledgeDBPath)
+			return
+		}
+		fmt.Fprintf(os.Stderr, "  salvage failed: %v — falling back to text ingest\n", e)
 	}
 
 	// 3b. fallback: text + code error-string ingest
@@ -520,6 +546,99 @@ func runImportSchema(path string) {
 	fmt.Printf("imported %s — %d tables, %d foreign keys into %s\n", path, st.Tables, st.FKs, cfg.KnowledgeDBPath)
 }
 
+// runImportModel extracts an object model from any structured source-of-truth
+// (.proto / OpenAPI .yaml|.json / C-struct .h|.c / .sql) into the graph.
+func runImportModel(path string) {
+	if strings.TrimSpace(path) == "" {
+		fail("usage: oss-agent import-model <file.proto|openapi.yaml|*.h|schema.sql>")
+	}
+	cfg := config.Load()
+	if cfg.EmbAPIKey == "" {
+		fail("set OSS_EMB_API_KEY (or OSS_LLM_API_KEY) for embeddings")
+	}
+	store, err := knowledge.Open(cfg.KnowledgeDBPath, cfg.EmbBaseURL, cfg.EmbAPIKey, cfg.EmbModel, cfg.EmbDim)
+	if err != nil {
+		fail("open knowledge: %v", err)
+	}
+	defer store.Close()
+	st, err := objectmodel.Load(context.Background(), store, path)
+	if err != nil {
+		fail("import model: %v", err)
+	}
+	fmt.Printf("imported %s [%s] — %d objects, %d references into %s\n", path, st.Format, st.Objects, st.Refs, cfg.KnowledgeDBPath)
+}
+
+// runSalvage rebuilds a knowledge-graph.json from a stalled Understand-Anything
+// run's intermediate batches (no re-run needed), then imports it.
+func runSalvage(arg string) {
+	if strings.TrimSpace(arg) == "" {
+		fail("usage: oss-agent salvage <repo-dir>   (a repo whose .understand-anything/intermediate exists)")
+	}
+	cfg := config.Load()
+	if cfg.EmbAPIKey == "" {
+		fail("set OSS_EMB_API_KEY (or OSS_LLM_API_KEY) for embeddings")
+	}
+	merged, ss, err := salvage.Salvage(arg)
+	if err != nil {
+		fail("salvage: %v", err)
+	}
+	fmt.Printf("salvaged %d nodes, %d edges, %d layers from %s → %s\n", ss.Nodes, ss.Edges, ss.Layers, strings.Join(ss.Sources, ", "), merged)
+	store, err := knowledge.Open(cfg.KnowledgeDBPath, cfg.EmbBaseURL, cfg.EmbAPIKey, cfg.EmbModel, cfg.EmbDim)
+	if err != nil {
+		fail("open knowledge: %v", err)
+	}
+	defer store.Close()
+	st, err := graphimport.Import(context.Background(), store, merged)
+	if err != nil {
+		fail("import salvaged graph: %v", err)
+	}
+	fmt.Printf("imported salvaged graph — %d nodes, %d edges into %s\n", st.Nodes, st.Edges, cfg.KnowledgeDBPath)
+}
+
+// runInit drafts a domain.toml for a repo via the LLM and writes it to
+// domain.generated.toml. The operator must review it (esp. red_lines) before use.
+func runInit(arg string) {
+	if strings.TrimSpace(arg) == "" {
+		fail("usage: oss-agent init <git-url|local-dir>   (drafts domain.generated.toml via the LLM)")
+	}
+	cfg := config.Load()
+	if cfg.LLMAPIKey == "" {
+		fail("set OSS_LLM_API_KEY — init drafts the config with the LLM")
+	}
+	ctx := context.Background()
+
+	dir, name := arg, filepath.Base(strings.TrimRight(arg, "/"))
+	if strings.HasPrefix(arg, "http://") || strings.HasPrefix(arg, "https://") || strings.HasSuffix(arg, ".git") {
+		name = strings.TrimSuffix(filepath.Base(arg), ".git")
+		dir = filepath.Join("repos", name)
+		if _, statErr := os.Stat(dir); os.IsNotExist(statErr) {
+			fmt.Printf("cloning %s → %s (shallow)\n", arg, dir)
+			cmd := exec.CommandContext(ctx, "git", "clone", "--depth", "1", arg, dir)
+			cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+			if e := cmd.Run(); e != nil {
+				fail("git clone: %v", e)
+			}
+		}
+	}
+
+	llm, err := agents.LLM(cfg)
+	if err != nil {
+		fail("init llm: %v", err)
+	}
+	fmt.Printf("drafting domain config from %s (model=%s)…\n", dir, cfg.LLMModel)
+	toml, err := scaffold.Generate(ctx, llm, dir, name)
+	if err != nil {
+		fail("scaffold: %v", err)
+	}
+	out := "domain.generated.toml"
+	if err := os.WriteFile(out, []byte(toml), 0o644); err != nil {
+		fail("write %s: %v", out, err)
+	}
+	fmt.Printf("\nwrote %s\n", out)
+	fmt.Println("→ REVIEW it (especially [[red_lines]] and [[probes]]), then:")
+	fmt.Printf("   cp %s domain.toml && oss-agent domain    # verify it loads\n", out)
+}
+
 // runSearch queries the knowledge base directly (no LLM) — useful to verify ingest.
 func runSearch(query string) {
 	if strings.TrimSpace(query) == "" {
@@ -609,15 +728,19 @@ func usage() {
 (generic engine; the active domain is a plug-in — LINBIT/DRBD/LINSTOR is the first example)
 
 usage:
+  oss-agent init <url|dir>      draft a domain.toml for a repo via the LLM (review before use)
   oss-agent ask <question>      ask the agent (calls probes + knowledge search)
   oss-agent diagnose <symptom>  troubleshoot a cluster symptom
   oss-agent chat                multi-turn conversation (history kept; ReAct tools)
   oss-agent serve               start the HTTP API (OSS_HTTP_ADDR, default :7634)
   oss-agent analyze-log <path>  triage a log file / dir / .tar.gz / .zip, then AI diagnosis
   oss-agent ingest <dir>        ingest *.md docs from a directory
-  oss-agent ingest-repo <url>   one-liner: clone → understand → import (graph)
+  oss-agent ingest-repo <url>   one-liner: clone → understand → import (auto-salvages a stall)
   oss-agent refresh <url|dir>   purge one source (catches deletions) and re-import it
   oss-agent import-graph <f>    import an Understand-Anything knowledge-graph.json
+  oss-agent import-schema <f>   import a SQL schema (CREATE TABLE → entity, FK → relation)
+  oss-agent import-model <f>    import an object model: .proto / OpenAPI .yaml|.json / .h struct / .sql
+  oss-agent salvage <repo-dir>  rebuild a graph from a stalled understand run's intermediate batches
   oss-agent check <command...>  test a command against the red-line safety wall
   oss-agent version
 
