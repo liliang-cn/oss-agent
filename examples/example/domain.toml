@@ -1,0 +1,113 @@
+# Example domain config.
+# This is ONE worked example of an oss-agent domain. Any project copies this
+# file, edits it for their own product, and points oss-agent at it via
+# OSS_DOMAIN_FILE — no platform source changes needed. The example below models a
+# generic Linux storage/HA product; replace every field with your own.
+
+name = "Example storage/infra domain"
+title = "Example knowledge"
+
+persona = '''
+You are an expert SRE copilot for a software-defined storage and high-availability
+product running on Linux clusters.
+
+How you work:
+- Reason step by step (ReAct). When you need live system state, call the read-only
+  probe tools. They are strictly read-only.
+- Ground every diagnosis in the knowledge base: call knowledge_search for the
+  relevant docs, states, recovery procedures, and source error strings.
+- When you recommend a fix, give the exact commands in a fenced code block.
+
+Safety (non-negotiable):
+- A deterministic safety wall, independent of you, blocks data-destroying commands
+  (wipefs, dd to a device, mkfs, lvremove/lvreduce, vgremove, zfs/zpool destroy, etc.).
+- If a fix genuinely requires such a command, do NOT present it as a one-liner to run.
+  Explain the risk, the affected volumes, the backup precondition, and state clearly
+  that it requires explicit operator confirmation and an unlock key.
+'''
+
+entity_types = [
+  "Cluster", "Node", "StoragePool", "ResourceGroup", "Resource", "Volume",
+  "KernelModule", "ErrorCode", "CLI_Command", "ConfigParameter", "State",
+]
+
+relation_types = [
+  "DEPLOYED_ON", "CONTAINS", "MANAGES", "DEPENDS_ON", "TRIGGERED_BY",
+  "RESOLVES", "MUTUALLY_EXCLUSIVE", "TRIGGERED_IN_STATE", "DEFINED_IN",
+]
+
+# Regex sources (TOML literal strings preserve backslashes). Group 1 = message.
+# These mine the log/error string literals an operator actually sees, so a
+# real-world error line can be traced back to its source.
+error_patterns = [
+  '(?:printk|pr_err|pr_warn|pr_crit|dev_err|dev_warn)\s*\([^"]*"([^"]{8,})"',
+  'fprintf\s*\(\s*stderr\s*,\s*"([^"]{8,})"',
+  '\blog_(?:err|error|warn|warning|crit)\s*\([^"]*"([^"]{8,})"',
+  '\bperror\s*\(\s*"([^"]{6,})"',
+  '(?:new\s+\w*Exception|LOG\.(?:error|warn)|errorReporter\.\w+|reportError)\s*\([^"]*"([^"]{8,})"',
+]
+
+# Source/doc repositories to ingest into the knowledge graph. Add your project's
+# repos here; oss-agent clones, understands, and imports each.
+repos = []
+
+# Deterministic destructive-command blocks (LLM-independent). The platform owns
+# the mechanism; these rules are domain-specific. Drop them and nothing is blocked.
+# The ones below are universal Linux storage operations — keep what applies to
+# your product and add your own CLI's dangerous verbs.
+[[red_lines]]
+id = "wipefs"
+severity = "CRITICAL"
+pattern = '\bwipefs\b'
+reason = "wipefs erases filesystem signatures; data irreversibly lost"
+
+[[red_lines]]
+id = "dd-to-device"
+severity = "CRITICAL"
+pattern = '\bdd\b.*\bof=/dev/'
+reason = "dd to a block device overwrites raw disk data"
+
+[[red_lines]]
+id = "mkfs"
+severity = "CRITICAL"
+pattern = '\bmkfs(\.\w+)?\b'
+reason = "mkfs rebuilds a filesystem, wiping the target device"
+
+[[red_lines]]
+id = "lvremove"
+severity = "CRITICAL"
+pattern = '\blvremove\b'
+reason = "lvremove deletes a logical volume; data on it is lost"
+
+[[red_lines]]
+id = "vgremove"
+severity = "CRITICAL"
+pattern = '\bvgremove\b'
+reason = "vgremove deletes a volume group"
+
+[[red_lines]]
+id = "zfs-destroy"
+severity = "CRITICAL"
+pattern = '\bzfs\b.*\bdestroy\b'
+reason = "zfs destroy deletes a dataset/volume/snapshot"
+
+[[red_lines]]
+id = "zpool-destroy"
+severity = "CRITICAL"
+pattern = '\bzpool\b.*\bdestroy\b'
+reason = "zpool destroy destroys an entire storage pool"
+
+[[probes]]
+name = "lsblk"
+description = "Show host block devices and topology."
+argv = ["lsblk"]
+
+[[probes]]
+name = "vgs"
+description = "Show LVM volume groups and free space."
+argv = ["vgs"]
+
+[[probes]]
+name = "zpool_status"
+description = "Show ZFS pool health and device status."
+argv = ["zpool", "status"]

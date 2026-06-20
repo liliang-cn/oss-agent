@@ -2,7 +2,7 @@
 // LLM, a cortexdb-backed graph memory, the domain's read-only probe tools, a
 // GraphRAG knowledge_search tool, and the deterministic red-line safety wall.
 // Everything product-specific comes from the *domain.Domain, so the same builder
-// serves LINBIT, RustFS, or any future storage product.
+// serves any storage or infrastructure product.
 package agents
 
 import (

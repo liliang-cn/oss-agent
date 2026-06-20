@@ -6,7 +6,7 @@ import "testing"
 func sampleFilter(t *testing.T) *Filter {
 	t.Helper()
 	f, err := NewFromSpecs([]RuleSpec{
-		{ID: "drbd-primary-force", Severity: SeverityCritical, Pattern: `\bdrbdadm\b.*\bprimary\b.*--force`, Reason: "force-promote → split-brain"},
+		{ID: "ctl-force-promote", Severity: SeverityCritical, Pattern: `\bstoragectl\b.*\bpromote\b.*--force`, Reason: "force-promote → split-brain"},
 		{ID: "flag-overwrite", Severity: SeverityHigh, Pattern: `--overwrite`, Reason: "overwrites peer"},
 		{ID: "wipefs", Severity: SeverityCritical, Pattern: `\bwipefs\b`, Reason: "erases fs signatures"},
 		{ID: "lvremove", Severity: SeverityCritical, Pattern: `\blvremove\b`, Reason: "deletes LV"},
@@ -20,7 +20,7 @@ func sampleFilter(t *testing.T) *Filter {
 
 func TestEmptyFilterBlocksNothing(t *testing.T) {
 	f, _ := NewFromSpecs(nil)
-	if f.Check("drbdadm primary --force res0").Blocked {
+	if f.Check("storagectl promote --force res0").Blocked {
 		t.Fatal("a domain with no red-lines must block nothing")
 	}
 }
@@ -28,8 +28,8 @@ func TestEmptyFilterBlocksNothing(t *testing.T) {
 func TestFilter_SafeCommandsPass(t *testing.T) {
 	f := sampleFilter(t)
 	for _, cmd := range []string{
-		"drbdadm status res0", "linstor node list", "cat /proc/drbd", "lsblk", "vgs",
-		"linstor resource create node_b res_data --diskless",
+		"storagectl status res0", "storagectl node list", "cat /proc/mounts", "lsblk", "vgs",
+		"storagectl resource create node_b res_data --diskless",
 	} {
 		if v := f.Check(cmd); v.Blocked {
 			t.Errorf("expected SAFE, blocked: %q (rule=%s)", cmd, v.RuleID)
@@ -43,8 +43,8 @@ func TestFilter_DangerousCommandsBlocked(t *testing.T) {
 		cmd, rule string
 		critical  bool
 	}{
-		{"drbdadm primary --force res0", "drbd-primary-force", true},
-		{"drbdadm -- --overwrite-data-of-peer primary res0", "flag-overwrite", false},
+		{"storagectl promote --force res0", "ctl-force-promote", true},
+		{"storagectl -- --overwrite-data-of-peer promote res0", "flag-overwrite", false},
 		{"wipefs -a /dev/sdb", "wipefs", true},
 		{"lvremove vg0/lv_data", "lvremove", true},
 		{"zfs destroy tank/res0", "zfs-destroy", true},
@@ -62,7 +62,7 @@ func TestFilter_DangerousCommandsBlocked(t *testing.T) {
 
 func TestFilter_CatchesDangerInCompoundLine(t *testing.T) {
 	f := sampleFilter(t)
-	v := f.Check("drbdadm status res0 && lvremove -f vg0/lv_data")
+	v := f.Check("storagectl status res0 && lvremove -f vg0/lv_data")
 	if !v.Blocked || v.RuleID != "lvremove" {
 		t.Fatalf("expected lvremove blocked in compound line, got blocked=%v rule=%s", v.Blocked, v.RuleID)
 	}

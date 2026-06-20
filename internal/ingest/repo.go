@@ -1,6 +1,6 @@
-// Package ingest walks a LINBIT source/doc repository and feeds it into the
+// Package ingest walks a project's source/doc repository and feeds it into the
 // knowledge base. Docs are ingested as prose; source files are mined for the
-// log/error string literals operators actually see (printk, drbd_err, LOG.error,
+// log/error string literals operators actually see (printk, dev_err, LOG.error,
 // thrown exceptions) so a real-world error line can be traced back to its source.
 package ingest
 

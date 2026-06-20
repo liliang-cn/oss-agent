@@ -2,8 +2,8 @@
 
 A **product-agnostic platform** for building AI ops & support agents over an
 open-source project. The engine knows nothing about any specific product — a
-"domain" is supplied entirely by a `domain.toml`. LINBIT (DRBD/LINSTOR) is the
-first example domain; the same engine serves any storage/infra project.
+"domain" is supplied entirely by a `domain.toml`. A worked example domain ships
+under `examples/`; the same engine serves any storage/infra project.
 
 ## What it does
 
@@ -89,7 +89,7 @@ Two memory layers on `/chat`:
 ## Configuration (env)
 
 ```
-OSS_DOMAIN_FILE     path to the active domain.toml (e.g. examples/linbit/domain.toml)
+OSS_DOMAIN_FILE     path to the active domain.toml (e.g. examples/example/domain.toml)
 OSS_LLM_API_KEY     LLM key (OpenAI-compatible)   OSS_LLM_BASE_URL / OSS_LLM_MODEL
 OSS_EMB_API_KEY     embedder key                  OSS_EMB_BASE_URL / OSS_EMB_MODEL / OSS_EMB_DIM
 OSS_KNOWLEDGE_DB_PATH  cortexdb path (default ./data/knowledge.db)
@@ -103,7 +103,7 @@ The embedder used to query must match the one used to build the store (e.g. olla
 
 ## Building a new domain
 
-1. Write a `domain.toml` (see `examples/linbit/domain.toml`): persona,
+1. Write a `domain.toml` (see `examples/example/domain.toml`): persona,
    entity/relation types, `error_patterns`, `probes`, `repos`, `red_lines`.
 2. Point `OSS_DOMAIN_FILE` at it.
 3. Ingest the project's repos (`ingest-repo`) and docs (`ingest-repo` text path).

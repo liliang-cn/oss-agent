@@ -10,8 +10,8 @@ write domain.toml  →  build knowledge base  →  serve  →  deploy
     judgment)            import-schema)          binary)       Caddy/systemd)
 ```
 
-The engine has no compiled-in product knowledge. LINBIT (`examples/linbit/domain.toml`)
-is just the first customer; copy it as a template.
+The engine has no compiled-in product knowledge. A worked example
+(`examples/example/domain.toml`) ships as a template; copy it and edit.
 
 ---
 
@@ -29,7 +29,7 @@ is just the first customer; copy it as a template.
 Environment used throughout (export once):
 
 ```bash
-export OSS_DOMAIN_FILE=examples/linbit/domain.toml
+export OSS_DOMAIN_FILE=examples/example/domain.toml
 export OSS_LLM_API_KEY=<key>   OSS_LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1  OSS_LLM_MODEL=qwen3.7-plus
 export OSS_EMB_API_KEY=<key>   OSS_EMB_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1  OSS_EMB_MODEL=text-embedding-v4  OSS_EMB_DIM=1024
 export OSS_UNDERSTAND_CMD='claude -p "/understand ." --dangerously-skip-permissions'
@@ -51,7 +51,7 @@ oss-agent init https://github.com/<org>/<repo>   # clone + LLM → domain.genera
 the draft** — especially `[[red_lines]]` (the destructive-command safety wall) and
 `[[probes]]` (commands the agent may run) — then `cp domain.generated.toml domain.toml`.
 
-**Or by hand:** copy `examples/linbit/domain.toml` and edit. Fields:
+**Or by hand:** copy `examples/example/domain.toml` and edit. Fields:
 
 | field | meaning |
 |---|---|
@@ -110,7 +110,7 @@ oss-agent import-model path/to/source     # auto-detects format → entities + R
 >
 > `import-schema` remains as the SQL-only alias; `import-model` covers all of the
 > above (and routes `.sql` to the same parser). For a project with no SQL — e.g.
-> DRBD (C) — point `import-model` at its core header(s) or `.proto`.
+> a C codebase — point `import-model` at its core header(s) or `.proto`.
 
 **d) Verify:**
 

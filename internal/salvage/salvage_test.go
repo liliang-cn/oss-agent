@@ -9,7 +9,7 @@ import (
 // TestSalvageRealData runs the merge against a real Understand-Anything run if one
 // is present in the working tree (skipped in CI / clean checkouts).
 func TestSalvageRealData(t *testing.T) {
-	repo := "../../repos/drbd-utils"
+	repo := "../../repos/example"
 	if !Available(repo) {
 		t.Skip("no real intermediate output at " + repo)
 	}

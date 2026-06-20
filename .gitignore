@@ -1,7 +1,6 @@
 # build artifacts
 bin/
 /oss-agent
-/linbit-agent
 
 # runtime data (cortexdb knowledge base + agent memory)
 data/

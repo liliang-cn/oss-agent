@@ -6,7 +6,7 @@ import (
 )
 
 // render turns a draft into a domain.toml string, matching the layout of
-// examples/linbit/domain.toml. red_lines and probes are annotated as REVIEW so
+// examples/example/domain.toml. red_lines and probes are annotated as REVIEW so
 // the operator audits the safety wall before trusting it.
 func render(d *draft, repoName string) string {
 	var b strings.Builder

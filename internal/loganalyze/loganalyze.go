@@ -5,8 +5,8 @@
 // Findings are normalized into signatures and aggregated so the noisy bundle
 // collapses into a short ranked list of distinct problems.
 //
-// Nothing here is specific to any product: LINSTOR, RustFS, or a plain app log all
-// go through the same path. Product tuning enters only via the domain's regexes.
+// Nothing here is specific to any product: a service log, a kernel log, or a plain
+// app log all go through the same path. Product tuning enters only via the domain's regexes.
 package loganalyze
 
 import (

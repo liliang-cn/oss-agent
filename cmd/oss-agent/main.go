@@ -1,4 +1,4 @@
-// Command oss-agent is the CLI entry point for the LINBIT-Ops agent.
+// Command oss-agent is the CLI entry point for the oss-agent ops & support agent.
 //
 //	oss-agent ask <question>        one-shot Q&A (may call read-only probes)
 //	oss-agent diagnose <symptom>    same loop, framed for troubleshooting
@@ -725,7 +725,7 @@ func runCheck(cmd string) {
 
 func usage() {
 	fmt.Fprint(os.Stderr, `oss-agent — AI ops & support agent for storage products
-(generic engine; the active domain is a plug-in — LINBIT/DRBD/LINSTOR is the first example)
+(generic engine; the active domain is a plug-in supplied entirely by a domain.toml)
 
 usage:
   oss-agent init <url|dir>      draft a domain.toml for a repo via the LLM (review before use)
@@ -772,7 +772,7 @@ func runDomain() {
 func loadDomain(cfg config.Config) *domain.Domain {
 	d, err := domain.Load(cfg.DomainFile)
 	if err != nil {
-		fail("%v\n  set OSS_DOMAIN_FILE to your product's domain.toml (see examples/linbit/domain.toml)", err)
+		fail("%v\n  set OSS_DOMAIN_FILE to your product's domain.toml (see examples/example/domain.toml)", err)
 	}
 	return d
 }

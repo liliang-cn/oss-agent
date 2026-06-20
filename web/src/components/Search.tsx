@@ -48,7 +48,7 @@ export function Search() {
   return (
     <div className="flex h-full flex-col">
       <form onSubmit={run} className="flex gap-2">
-        <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search code, docs & KB — e.g. drbd_send sending path" />
+        <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search code, docs & KB — e.g. replication sending path" />
         <Button type="submit" disabled={loading}>
           {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <SearchIcon className="h-4 w-4" />} Search
         </Button>

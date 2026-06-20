@@ -45,8 +45,8 @@ export function Chat() {
         {messages.length === 0 && (
           <div className="mt-20 text-center text-muted-foreground">
             <Sparkles className="mx-auto mb-3 h-8 w-8 text-primary" />
-            <p className="text-lg font-medium text-foreground">Ask the LINBIT knowledge agent</p>
-            <p className="mt-1 text-sm">Grounded in DRBD / LINSTOR code, docs, KB &amp; internal skills.</p>
+            <p className="text-lg font-medium text-foreground">Ask the knowledge agent</p>
+            <p className="mt-1 text-sm">Grounded in your project's code, docs, KB &amp; internal skills.</p>
           </div>
         )}
         {messages.map((m) => (
@@ -88,7 +88,7 @@ export function Chat() {
           value={input}
           onChange={handleInputChange}
           onKeyDown={onKey}
-          placeholder="e.g. How do I recover a StandAlone DRBD resource safely?"
+          placeholder="e.g. How do I safely recover a resource stuck in a degraded state?"
           rows={1}
           className="max-h-40"
         />

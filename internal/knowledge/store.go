@@ -1,4 +1,4 @@
-// Package knowledge is the GraphRAG knowledge base over DRBD/LINSTOR material.
+// Package knowledge is the GraphRAG knowledge base over a project's source and docs.
 // It wraps cortexdb: documents are chunked, embedded, and linked into a graph;
 // retrieval is vector + graph expansion.
 package knowledge
@@ -56,7 +56,7 @@ func (s *Store) IngestDoc(ctx context.Context, id, title, content string) error 
 		Title:      title,
 		Content:    content,
 		ChunkSize:  800,
-		Metadata:   map[string]string{"source": "linbit-knowledge"},
+		Metadata:   map[string]string{"source": "text-knowledge"},
 	})
 	return err
 }
@@ -131,7 +131,7 @@ func (s *Store) SearchGraph(ctx context.Context, query string, topK int) (*Graph
 	}
 	res := &GraphResult{}
 	// The graph stores nodes under cortexdb-normalized "entity:" ids, while the
-	// embedding/chunk id is the raw node id (e.g. "function:drbd/drbd_main.c:foo").
+	// embedding/chunk id is the raw node id (e.g. "function:pkg/main.c:foo").
 	// Map each seed chunk id to its entity id so expansion can match.
 	seeds := make([]string, 0, len(results))
 	seedSet := make(map[string]struct{}, len(results))

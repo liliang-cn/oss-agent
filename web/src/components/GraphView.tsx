@@ -172,7 +172,7 @@ export function GraphView() {
   return (
     <div className="flex h-full flex-col">
       <form onSubmit={run} className="flex gap-2">
-        <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Seed the graph — e.g. resource definition controller, drbd_send" />
+        <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Seed the graph — e.g. resource definition controller, send path" />
         <Button type="submit" disabled={loading}>
           {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <SearchIcon className="h-4 w-4" />} Explore
         </Button>

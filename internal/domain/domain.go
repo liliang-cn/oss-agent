@@ -1,8 +1,8 @@
 // Package domain is the platform's product-agnostic seam. oss-agent is a generic
 // engine; each project that uses it describes ITS OWN product in a domain.toml
 // config — persona, ontology vocabulary, source error patterns, read-only probes,
-// and repos. No product is compiled into the platform. LINBIT/DRBD-LINSTOR ships
-// only as an example config under examples/.
+// and repos. No product is compiled into the platform; a worked example config
+// ships under examples/.
 package domain
 
 import (
