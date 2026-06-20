@@ -112,15 +112,21 @@ func registerKnowledgeSearch(svc *agent.Service, store *knowledge.Store) {
 		"required": []string{"query"},
 	}
 	svc.AddTool("knowledge_search",
-		"Search the GraphRAG knowledge base (docs, states, recovery procedures, source error strings) for grounding.",
+		"Search the GraphRAG knowledge base (code, docs, recovery procedures, source error strings). "+
+			"Returns the top hits plus related code reached one hop along the knowledge graph "+
+			"(calls/contains/depends_on/… edges), so call sites and implementations come together.",
 		params,
 		func(ctx context.Context, args map[string]interface{}) (interface{}, error) {
 			query, _ := args["query"].(string)
-			hits, err := store.SearchSemantic(ctx, query, 6)
+			gr, err := store.SearchGraph(ctx, query, 6)
 			if err != nil {
 				return map[string]interface{}{"ok": false, "error": err.Error()}, nil
 			}
-			return map[string]interface{}{"ok": true, "hits": hits}, nil
+			return map[string]interface{}{
+				"ok":               true,
+				"hits":             gr.Hits,
+				"related_via_graph": gr.Neighbors,
+			}, nil
 		})
 }
 

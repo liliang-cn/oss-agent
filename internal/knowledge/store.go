@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"github.com/liliang-cn/cortexdb/v2/pkg/cortexdb"
 
@@ -80,6 +81,149 @@ func (s *Store) Search(ctx context.Context, query string, topK int) ([]Hit, erro
 		hits = append(hits, Hit{DocumentID: c.DocumentID, Content: c.Content, Score: c.Score, Entities: c.Entities})
 	}
 	return hits, nil
+}
+
+// Neighbor is a graph node reached by expanding along code-semantic edges from a
+// retrieved hit (one hop). It explains *why* it's related via the edge type.
+type Neighbor struct {
+	ID       string
+	Name     string
+	Type     string
+	Via      string // edge type that connected it to a seed (e.g. "calls", "contains")
+	Summary  string
+	FilePath string
+}
+
+// GraphResult is hybrid retrieval augmented with one-hop graph expansion.
+type GraphResult struct {
+	Hits      []Hit
+	Neighbors []Neighbor
+}
+
+// codeEdgeTypes are the behavioral/structural edges worth following during
+// expansion. We skip imports/exports (too many, low signal) and the navigational
+// layer_contains/tour_covers/mentions edges.
+var codeEdgeTypes = []string{"calls", "contains", "depends_on", "inherits", "implements", "triggers", "deploys", "related"}
+
+const (
+	graphNeighborsPerSeed = 6  // cap neighbors pulled per seed hit
+	graphNeighborsTotal   = 12 // overall cap on neighbors returned
+)
+
+// SearchGraph runs hybrid retrieval, then expands one hop along code-semantic
+// edges from the retrieved nodes, returning the hits plus their graph neighbors
+// (deduped, seed-excluded, capped). Doc/blog chunks that aren't graph nodes
+// simply contribute no neighbors.
+func (s *Store) SearchGraph(ctx context.Context, query string, topK int) (*GraphResult, error) {
+	if topK <= 0 {
+		topK = 6
+	}
+	results, err := s.db.HybridSearchText(ctx, query, topK)
+	if err != nil {
+		return nil, err
+	}
+	res := &GraphResult{}
+	// The graph stores nodes under cortexdb-normalized "entity:" ids, while the
+	// embedding/chunk id is the raw node id (e.g. "function:drbd/drbd_main.c:foo").
+	// Map each seed chunk id to its entity id so expansion can match.
+	seeds := make([]string, 0, len(results))
+	seedSet := make(map[string]struct{}, len(results))
+	for _, r := range results {
+		docID := r.Metadata["document_id"]
+		if docID == "" {
+			docID = r.ID
+		}
+		res.Hits = append(res.Hits, Hit{DocumentID: docID, Content: r.Content, Score: r.Score})
+		if r.ID != "" {
+			eid := graphEntityID(r.ID)
+			if _, dup := seedSet[eid]; !dup {
+				seeds = append(seeds, eid)
+				seedSet[eid] = struct{}{}
+			}
+		}
+	}
+	if len(seeds) == 0 {
+		return res, nil
+	}
+
+	exp, err := s.tb.ExpandGraph(ctx, cortexdb.ToolExpandGraphRequest{
+		NodeIDs:   seeds,
+		MaxHops:   1,
+		EdgeTypes: codeEdgeTypes,
+		Limit:     graphNeighborsPerSeed,
+	})
+	if err != nil {
+		// expansion is best-effort: fall back to plain hits rather than failing.
+		return res, nil
+	}
+
+	// edge type that connects a seed to each neighbor (for the "via" explanation)
+	via := make(map[string]string)
+	for _, e := range exp.Edges {
+		if _, ok := seedSet[e.FromNodeID]; ok {
+			via[e.ToNodeID] = e.EdgeType
+		}
+		if _, ok := seedSet[e.ToNodeID]; ok {
+			if _, seen := via[e.FromNodeID]; !seen {
+				via[e.FromNodeID] = e.EdgeType
+			}
+		}
+	}
+
+	seen := make(map[string]struct{})
+	for _, n := range exp.Nodes {
+		if n == nil || n.ID == "" {
+			continue
+		}
+		if _, isSeed := seedSet[n.ID]; isSeed {
+			continue
+		}
+		if _, dup := seen[n.ID]; dup {
+			continue
+		}
+		seen[n.ID] = struct{}{}
+		nb := Neighbor{ID: n.ID, Type: n.NodeType, Via: via[n.ID], Name: n.Content}
+		if p := n.Properties; p != nil {
+			if v, ok := p["name"].(string); ok && v != "" {
+				nb.Name = v
+			}
+			if v, ok := p["description"].(string); ok {
+				nb.Summary = v
+			}
+			if v, ok := p["file_path"].(string); ok {
+				nb.FilePath = v
+			}
+		}
+		res.Neighbors = append(res.Neighbors, nb)
+		if len(res.Neighbors) >= graphNeighborsTotal {
+			break
+		}
+	}
+	return res, nil
+}
+
+// graphEntityID mirrors cortexdb's graphEntityNodeID: lowercase, keep letters and
+// digits, map space/-/_ to '_', drop everything else, prefix "entity:". This lets
+// us turn a raw chunk/node id into the normalized id under which the graph stores
+// the corresponding entity node.
+func graphEntityID(raw string) string {
+	if strings.HasPrefix(raw, "entity:") {
+		return raw
+	}
+	var b strings.Builder
+	for _, r := range strings.ToLower(strings.TrimSpace(raw)) {
+		switch {
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			b.WriteRune(r)
+		case r == ' ' || r == '-' || r == '_':
+			b.WriteByte('_')
+		}
+	}
+	id := strings.Trim(b.String(), "_")
+	if id == "" {
+		id = "entity"
+	}
+	return "entity:" + id
 }
 
 // chunk splits text into ~size-byte passages on line boundaries.

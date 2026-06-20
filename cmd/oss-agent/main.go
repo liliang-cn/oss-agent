@@ -43,6 +43,8 @@ func main() {
 		runImportGraph(strings.Join(os.Args[2:], " "))
 	case "search":
 		runSearch(strings.Join(os.Args[2:], " "))
+	case "search-graph":
+		runSearchGraph(strings.Join(os.Args[2:], " "))
 	case "chat":
 		runChat()
 	case "analyze-log", "analyze-sos":
@@ -352,6 +354,40 @@ func runSearch(query string) {
 			snippet = snippet[:200] + "…"
 		}
 		fmt.Printf("%d. [%s] (score %.3f)\n   %s\n", i+1, h.DocumentID, h.Score, snippet)
+	}
+}
+
+// runSearchGraph queries with one-hop graph expansion (the same path knowledge_search
+// uses): top hits plus related code reached along calls/contains/… edges.
+func runSearchGraph(query string) {
+	if strings.TrimSpace(query) == "" {
+		fail("usage: oss-agent search-graph <query>")
+	}
+	cfg := config.Load()
+	store, err := knowledge.Open(cfg.KnowledgeDBPath, cfg.EmbBaseURL, cfg.EmbAPIKey, cfg.EmbModel, cfg.EmbDim)
+	if err != nil {
+		fail("open knowledge: %v", err)
+	}
+	defer store.Close()
+	gr, err := store.SearchGraph(context.Background(), query, 5)
+	if err != nil {
+		fail("search-graph: %v", err)
+	}
+	fmt.Printf("== hits (%d) ==\n", len(gr.Hits))
+	for i, h := range gr.Hits {
+		snippet := strings.Join(strings.Fields(h.Content), " ")
+		if len(snippet) > 160 {
+			snippet = snippet[:160] + "…"
+		}
+		fmt.Printf("%d. [%s] (%.3f) %s\n", i+1, h.DocumentID, h.Score, snippet)
+	}
+	fmt.Printf("\n== related via graph (%d) ==\n", len(gr.Neighbors))
+	for i, n := range gr.Neighbors {
+		sum := strings.Join(strings.Fields(n.Summary), " ")
+		if len(sum) > 140 {
+			sum = sum[:140] + "…"
+		}
+		fmt.Printf("%d. (%s ←%s) %s — %s\n", i+1, n.Type, n.Via, n.Name, sum)
 	}
 }
 
