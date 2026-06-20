@@ -15,3 +15,6 @@ skills/
 
 # misc
 .DS_Store
+
+# cross-compile output (make build-linux)
+/dist/
