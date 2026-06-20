@@ -39,7 +39,7 @@ import (
 	"github.com/liliang-cn/oss-agent/internal/schemaimport"
 )
 
-const version = "oss-agent 0.1.0 (slice 1: core brain)"
+const version = "oss-agent 0.2.0"
 
 func main() {
 	if len(os.Args) < 2 {
