@@ -26,15 +26,17 @@ import (
 // svc may be nil (no LLM key): the LLM-backed endpoints then return 503 while the
 // search endpoints keep working.
 type Server struct {
-	svc   *agent.Service
-	store *knowledge.Store
-	dom   *domain.Domain
-	mu    sync.Mutex // serializes LLM agent runs (one ReAct loop at a time)
+	svc        *agent.Service
+	store      *knowledge.Store
+	dom        *domain.Domain
+	convMemory bool       // cross-session conversation memory on /chat
+	mu         sync.Mutex // serializes LLM agent runs (one ReAct loop at a time)
 }
 
 // New builds a Server. Pass svc=nil for a search-only (no-LLM) deployment.
-func New(svc *agent.Service, store *knowledge.Store, dom *domain.Domain) *Server {
-	return &Server{svc: svc, store: store, dom: dom}
+// convMemory enables cross-session semantic recall of past chat turns on /chat.
+func New(svc *agent.Service, store *knowledge.Store, dom *domain.Domain, convMemory bool) *Server {
+	return &Server{svc: svc, store: store, dom: dom, convMemory: convMemory}
 }
 
 // Routes returns the HTTP handler with all endpoints mounted.
@@ -121,17 +123,54 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if sid == "" {
 		sid = newSessionID()
 	}
+
+	// Cross-session recall: pull semantically relevant turns from any past
+	// conversation and prepend them as optional context (best-effort).
+	message := req.Message
+	recalled := 0
+	if s.convMemory {
+		if turns, rerr := s.store.RecallTurns(r.Context(), req.Message, 4); rerr == nil && len(turns) > 0 {
+			var b strings.Builder
+			b.WriteString("Context recalled from earlier conversations (use if relevant, otherwise ignore):\n")
+			for _, t := range turns {
+				b.WriteString(fmt.Sprintf("- [%s] %s\n", t.Role, truncate(t.Content, 240)))
+			}
+			b.WriteString("\nCurrent message:\n")
+			b.WriteString(req.Message)
+			message = b.String()
+			recalled = len(turns)
+		}
+	}
+
 	s.mu.Lock()
-	res, err := s.svc.Run(r.Context(), req.Message, agent.WithSessionID(sid))
+	res, err := s.svc.Run(r.Context(), message, agent.WithSessionID(sid))
 	s.mu.Unlock()
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, "chat failed: "+err.Error())
 		return
 	}
+	answer := res.Text()
+
+	// Persist this turn into the shared conversation memory (best-effort).
+	if s.convMemory {
+		_ = s.store.SaveTurn(r.Context(), sid, "user", req.Message)
+		_ = s.store.SaveTurn(r.Context(), sid, "assistant", answer)
+	}
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"session_id": sid,
-		"answer":     res.Text(),
+		"answer":     answer,
+		"recalled":   recalled,
 	})
+}
+
+// truncate shortens s to at most n runes for compact recall context.
+func truncate(s string, n int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > n {
+		return s[:n] + "…"
+	}
+	return s
 }
 
 // handleAskStream streams the answer token-by-token over Server-Sent Events.

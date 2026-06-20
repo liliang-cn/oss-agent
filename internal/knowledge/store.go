@@ -5,6 +5,8 @@ package knowledge
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -249,6 +251,65 @@ func (s *Store) PurgeSource(ctx context.Context, docMatch string, prefix bool) (
 		return len(embIDs), 0, fmt.Errorf("delete graph nodes: %w", derr)
 	}
 	return len(embIDs), res.SuccessCount, nil
+}
+
+// ── cross-session conversation memory (cortexdb Memory API) ──
+
+// convNamespace buckets all chat turns into one global, cross-session pool so a
+// new question can semantically recall relevant turns from any past conversation.
+const convNamespace = "conversations"
+
+// ConvTurn is a recalled past conversation turn.
+type ConvTurn struct {
+	Role      string
+	Content   string
+	SessionID string
+	Score     float64
+}
+
+// SaveTurn records one chat turn into the shared conversation memory (embedded for
+// semantic recall). Best-effort: callers typically ignore the error.
+func (s *Store) SaveTurn(ctx context.Context, sessionID, role, content string) error {
+	_, err := s.db.SaveMemory(ctx, cortexdb.MemorySaveRequest{
+		MemoryID:  "conv:" + role + ":" + randomID(),
+		Scope:     "global",
+		Namespace: convNamespace,
+		Role:      role,
+		Content:   content,
+		Metadata:  map[string]any{"session_id": sessionID},
+	})
+	return err
+}
+
+// randomID returns a short random hex id (for memory record keys).
+func randomID() string {
+	var b [12]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "x"
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// RecallTurns semantically recalls relevant past turns across ALL sessions.
+func (s *Store) RecallTurns(ctx context.Context, query string, topK int) ([]ConvTurn, error) {
+	if topK <= 0 {
+		topK = 4
+	}
+	resp, err := s.db.SearchMemory(ctx, cortexdb.MemorySearchRequest{
+		Scope:     "global",
+		Namespace: convNamespace,
+		Query:     query,
+		TopK:      topK,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ConvTurn, 0, len(resp.Results))
+	for _, h := range resp.Results {
+		sid, _ := h.Memory.Metadata["session_id"].(string)
+		out = append(out, ConvTurn{Role: h.Memory.Role, Content: h.Memory.Content, SessionID: sid, Score: h.Score})
+	}
+	return out, nil
 }
 
 // graphEntityID mirrors cortexdb's graphEntityNodeID: lowercase, keep letters and

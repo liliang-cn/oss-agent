@@ -78,6 +78,14 @@ POST /analyze-log    multipart 'log' file OR {path}   → triage groups; ?diagno
 Multi-turn history is keyed by `session_id` and persisted by agent-go's session
 store (at `OSS_DB_PATH`), so conversations survive across requests and restarts.
 
+Two memory layers on `/chat`:
+- **within-session** — agent-go session history (same `session_id`).
+- **cross-session** — every turn is also embedded into cortexdb's memory
+  (global `conversations` bucket); each new question semantically recalls relevant
+  turns from *any* past conversation and prepends them as optional context. The
+  response's `recalled` field reports how many were pulled. Toggle with
+  `OSS_CONV_MEMORY=off`.
+
 ## Configuration (env)
 
 ```
@@ -86,6 +94,7 @@ OSS_LLM_API_KEY     LLM key (OpenAI-compatible)   OSS_LLM_BASE_URL / OSS_LLM_MOD
 OSS_EMB_API_KEY     embedder key                  OSS_EMB_BASE_URL / OSS_EMB_MODEL / OSS_EMB_DIM
 OSS_KNOWLEDGE_DB_PATH  cortexdb path (default ./data/knowledge.db)
 OSS_HTTP_ADDR       HTTP API listen address for `serve` (default :7634)
+OSS_CONV_MEMORY     cross-session chat memory on /chat (default on; set "off" to disable)
 OSS_UNDERSTAND_CMD  command run in a repo to produce knowledge-graph.json
 ```
 

@@ -305,8 +305,9 @@ func runServe() {
 	defer store.Close()
 
 	addr := env("OSS_HTTP_ADDR", ":7634")
-	srv := httpapi.New(svc, store, dom)
-	fmt.Printf("oss-agent serving %s on %s  (llm=%v, probes=%d)\n", dom.Name, addr, svc != nil, len(dom.Probes))
+	convMem := svc != nil && env("OSS_CONV_MEMORY", "on") != "off"
+	srv := httpapi.New(svc, store, dom, convMem)
+	fmt.Printf("oss-agent serving %s on %s  (llm=%v, probes=%d, conv_memory=%v)\n", dom.Name, addr, svc != nil, len(dom.Probes), convMem)
 	fmt.Println("endpoints: POST /ask /diagnose /search /search-graph /analyze-log ; GET /healthz")
 	if err := http.ListenAndServe(addr, srv.Routes()); err != nil {
 		fail("http server: %v", err)
