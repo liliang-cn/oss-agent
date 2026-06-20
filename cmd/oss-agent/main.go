@@ -10,15 +10,19 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
+	agentpkg "github.com/liliang-cn/agent-go/v2/pkg/agent"
+
 	"github.com/liliang-cn/oss-agent/internal/agents"
 	"github.com/liliang-cn/oss-agent/internal/config"
 	"github.com/liliang-cn/oss-agent/internal/domain"
 	"github.com/liliang-cn/oss-agent/internal/graphimport"
+	"github.com/liliang-cn/oss-agent/internal/httpapi"
 	"github.com/liliang-cn/oss-agent/internal/ingest"
 	"github.com/liliang-cn/oss-agent/internal/knowledge"
 	"github.com/liliang-cn/oss-agent/internal/loganalyze"
@@ -49,6 +53,8 @@ func main() {
 		runSearchGraph(strings.Join(os.Args[2:], " "))
 	case "chat":
 		runChat()
+	case "serve":
+		runServe()
 	case "analyze-log", "analyze-sos":
 		runAnalyzeLog(strings.Join(os.Args[2:], " "))
 	case "domain":
@@ -273,6 +279,48 @@ func fileExists(p string) bool {
 	return err == nil && !info.IsDir()
 }
 
+// runServe starts the HTTP API. With an LLM key it serves the full agent
+// (/ask, /diagnose, /analyze-log?diagnose=true); without one it serves the
+// search-only endpoints. Address from OSS_HTTP_ADDR (default :7634).
+func runServe() {
+	cfg := config.Load()
+	dom := loadDomain(cfg)
+
+	var svc *agentpkg.Service
+	var store *knowledge.Store
+	var err error
+	if cfg.LLMAPIKey != "" {
+		svc, store, err = agents.Build(cfg, dom)
+		if err != nil {
+			fail("build agent: %v", err)
+		}
+		defer svc.Close()
+	} else {
+		fmt.Fprintln(os.Stderr, "warning: OSS_LLM_API_KEY not set — serving search-only (no /ask, /diagnose)")
+		store, err = knowledge.Open(cfg.KnowledgeDBPath, cfg.EmbBaseURL, cfg.EmbAPIKey, cfg.EmbModel, cfg.EmbDim)
+		if err != nil {
+			fail("open knowledge: %v", err)
+		}
+	}
+	defer store.Close()
+
+	addr := env("OSS_HTTP_ADDR", ":7634")
+	srv := httpapi.New(svc, store, dom)
+	fmt.Printf("oss-agent serving %s on %s  (llm=%v, probes=%d)\n", dom.Name, addr, svc != nil, len(dom.Probes))
+	fmt.Println("endpoints: POST /ask /diagnose /search /search-graph /analyze-log ; GET /healthz")
+	if err := http.ListenAndServe(addr, srv.Routes()); err != nil {
+		fail("http server: %v", err)
+	}
+}
+
+// env mirrors config's helper for the serve address.
+func env(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
 // runChat is a multi-turn REPL: one agent service, reused across turns, so the
 // agent-go session accumulates conversation history. Each turn is still a full
 // ReAct loop (tools → observe → decide → more tools or answer).
@@ -492,6 +540,7 @@ usage:
   oss-agent ask <question>      ask the agent (calls probes + knowledge search)
   oss-agent diagnose <symptom>  troubleshoot a cluster symptom
   oss-agent chat                multi-turn conversation (history kept; ReAct tools)
+  oss-agent serve               start the HTTP API (OSS_HTTP_ADDR, default :7634)
   oss-agent analyze-log <path>  triage a log file / dir / .tar.gz / .zip, then AI diagnosis
   oss-agent ingest <dir>        ingest *.md docs from a directory
   oss-agent ingest-repo <url>   one-liner: clone → understand → import (graph)

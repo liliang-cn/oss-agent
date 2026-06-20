@@ -47,6 +47,7 @@ repos/docs ───┘                         └── red-line safety wall (
 oss-agent ask <question>       one-shot Q&A (ReAct: probes + knowledge_search)
 oss-agent diagnose <symptom>   same loop, framed for troubleshooting
 oss-agent chat                 multi-turn (history kept across turns)
+oss-agent serve                start the HTTP API (OSS_HTTP_ADDR, default :7634)
 oss-agent analyze-log <path>   triage a log file / dir / .tar.gz / .zip, + AI diagnosis
 oss-agent ingest <dir>         ingest *.md docs
 oss-agent ingest-repo <url>    clone → understand → import (graph), or text fallback
@@ -58,6 +59,25 @@ oss-agent check <command...>   test a command against the red-line wall
 oss-agent domain               print the loaded domain config
 ```
 
+## HTTP API (`oss-agent serve`)
+
+A thin JSON layer over the same agent + knowledge store. Address via `OSS_HTTP_ADDR`
+(default `:7634`). Without an LLM key it serves the search endpoints only.
+
+```
+GET  /healthz                     status + loaded domain
+POST /ask            {question}                  → {answer}        (one-shot)
+POST /chat           {session_id?, message}      → {session_id, answer}  (multi-turn; history persisted)
+POST /ask/stream     {question} or ?q=           → SSE token stream (falls back to one chunk)
+POST /diagnose       {question}                  → {answer}        (troubleshooting framing)
+POST /search         {query, top_k}              → {hits}
+POST /search-graph   {query, top_k}              → {hits, related_via_graph}
+POST /analyze-log    multipart 'log' file OR {path}   → triage groups; ?diagnose=true adds AI root-cause
+```
+
+Multi-turn history is keyed by `session_id` and persisted by agent-go's session
+store (at `OSS_DB_PATH`), so conversations survive across requests and restarts.
+
 ## Configuration (env)
 
 ```
@@ -65,6 +85,7 @@ OSS_DOMAIN_FILE     path to the active domain.toml (e.g. examples/linbit/domain.
 OSS_LLM_API_KEY     LLM key (OpenAI-compatible)   OSS_LLM_BASE_URL / OSS_LLM_MODEL
 OSS_EMB_API_KEY     embedder key                  OSS_EMB_BASE_URL / OSS_EMB_MODEL / OSS_EMB_DIM
 OSS_KNOWLEDGE_DB_PATH  cortexdb path (default ./data/knowledge.db)
+OSS_HTTP_ADDR       HTTP API listen address for `serve` (default :7634)
 OSS_UNDERSTAND_CMD  command run in a repo to produce knowledge-graph.json
 ```
 
