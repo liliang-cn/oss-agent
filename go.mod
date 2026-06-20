@@ -4,7 +4,7 @@ go 1.25.5
 
 require (
 	github.com/BurntSushi/toml v1.6.0
-	github.com/liliang-cn/agent-go/v2 v2.88.0
+	github.com/liliang-cn/agent-go/v2 v2.90.0
 	github.com/liliang-cn/cortexdb/v2 v2.25.0
 )
 
