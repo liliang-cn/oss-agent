@@ -18,14 +18,15 @@ import (
 // Domain bundles the product-specific knowledge that shapes the agent. It is
 // loaded from a domain.toml; the engine treats it as opaque config.
 type Domain struct {
-	Name             string         `toml:"name"`           // human label
-	Persona          string         `toml:"persona"`        // agent system prompt
-	EntityTypes      []string       `toml:"entity_types"`   // ontology node types
-	RelationTypes    []string       `toml:"relation_types"` // ontology edge types
-	ErrorPatternsRaw []string       `toml:"error_patterns"` // regex sources (group 1 = message)
-	Probes           []probes.Probe   `toml:"probes"`     // read-only diagnostic commands
-	Repos            []string         `toml:"repos"`      // upstream repos to ingest
-	RedLines         []safety.RuleSpec `toml:"red_lines"` // deterministic destructive-command blocks
+	Name             string            `toml:"name"`           // human label
+	Title            string            `toml:"title"`          // UI title/brand (defaults to Name)
+	Persona          string            `toml:"persona"`        // agent system prompt
+	EntityTypes      []string          `toml:"entity_types"`   // ontology node types
+	RelationTypes    []string          `toml:"relation_types"` // ontology edge types
+	ErrorPatternsRaw []string          `toml:"error_patterns"` // regex sources (group 1 = message)
+	Probes           []probes.Probe    `toml:"probes"`         // read-only diagnostic commands
+	Repos            []string          `toml:"repos"`          // upstream repos to ingest
+	RedLines         []safety.RuleSpec `toml:"red_lines"`      // deterministic destructive-command blocks
 
 	// ErrorPatterns are compiled from ErrorPatternsRaw at load time.
 	ErrorPatterns []*regexp.Regexp `toml:"-"`
@@ -42,6 +43,9 @@ func Load(path string) (*Domain, error) {
 	}
 	if d.Persona == "" {
 		return nil, fmt.Errorf("domain %q: missing required field 'persona'", path)
+	}
+	if d.Title == "" {
+		d.Title = d.Name
 	}
 	for _, p := range d.ErrorPatternsRaw {
 		re, err := regexp.Compile(p)

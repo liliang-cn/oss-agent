@@ -10,13 +10,18 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"time"
 
 	agentpkg "github.com/liliang-cn/agent-go/v2/pkg/agent"
+
+	"github.com/liliang-cn/oss-agent/web"
 
 	"github.com/liliang-cn/oss-agent/internal/agents"
 	"github.com/liliang-cn/oss-agent/internal/config"
@@ -27,6 +32,7 @@ import (
 	"github.com/liliang-cn/oss-agent/internal/knowledge"
 	"github.com/liliang-cn/oss-agent/internal/loganalyze"
 	"github.com/liliang-cn/oss-agent/internal/safety"
+	"github.com/liliang-cn/oss-agent/internal/schemaimport"
 )
 
 const version = "oss-agent 0.1.0 (slice 1: core brain)"
@@ -47,6 +53,8 @@ func main() {
 		runRefresh(strings.Join(os.Args[2:], " "))
 	case "import-graph":
 		runImportGraph(strings.Join(os.Args[2:], " "))
+	case "import-schema":
+		runImportSchema(strings.Join(os.Args[2:], " "))
 	case "search":
 		runSearch(strings.Join(os.Args[2:], " "))
 	case "search-graph":
@@ -54,7 +62,9 @@ func main() {
 	case "chat":
 		runChat()
 	case "serve":
-		runServe()
+		runServe(false)
+	case "ui":
+		runServe(true)
 	case "analyze-log", "analyze-sos":
 		runAnalyzeLog(strings.Join(os.Args[2:], " "))
 	case "domain":
@@ -279,10 +289,11 @@ func fileExists(p string) bool {
 	return err == nil && !info.IsDir()
 }
 
-// runServe starts the HTTP API. With an LLM key it serves the full agent
-// (/ask, /diagnose, /analyze-log?diagnose=true); without one it serves the
-// search-only endpoints. Address from OSS_HTTP_ADDR (default :7634).
-func runServe() {
+// runServe starts the HTTP API + embedded web UI. With an LLM key it serves the
+// full agent (/ask, /chat, /analyze-log?diagnose=true); without one it serves the
+// search-only endpoints. Address from OSS_HTTP_ADDR (default :7634). When openUI
+// is true (the `ui` command) it also opens the browser.
+func runServe(openUI bool) {
 	cfg := config.Load()
 	dom := loadDomain(cfg)
 
@@ -304,14 +315,41 @@ func runServe() {
 	}
 	defer store.Close()
 
+	// Embedded web UI (web/dist) — nil if the build is absent.
+	var static fs.FS
+	if sub, e := fs.Sub(web.Dist, "dist"); e == nil {
+		if _, e2 := fs.Stat(sub, "index.html"); e2 == nil {
+			static = sub
+		}
+	}
+
 	addr := env("OSS_HTTP_ADDR", ":7634")
 	convMem := svc != nil && env("OSS_CONV_MEMORY", "on") != "off"
-	srv := httpapi.New(svc, store, dom, convMem)
-	fmt.Printf("oss-agent serving %s on %s  (llm=%v, probes=%d, conv_memory=%v)\n", dom.Name, addr, svc != nil, len(dom.Probes), convMem)
-	fmt.Println("endpoints: POST /ask /diagnose /search /search-graph /analyze-log ; GET /healthz")
+	srv := httpapi.New(svc, store, dom, convMem, static)
+	fmt.Printf("oss-agent serving %s on %s  (llm=%v, probes=%d, conv_memory=%v, ui=%v)\n", dom.Name, addr, svc != nil, len(dom.Probes), convMem, static != nil)
+	fmt.Println("API under /api/* ; web UI at / (if built)")
+
+	if openUI && static != nil {
+		go openBrowser("http://localhost" + addr)
+	}
 	if err := http.ListenAndServe(addr, srv.Routes()); err != nil {
 		fail("http server: %v", err)
 	}
+}
+
+// openBrowser best-effort opens the default browser at url (macOS/Linux/Windows).
+func openBrowser(url string) {
+	time.Sleep(400 * time.Millisecond)
+	var c *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		c = exec.Command("open", url)
+	case "windows":
+		c = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		c = exec.Command("xdg-open", url)
+	}
+	_ = c.Start()
 }
 
 // env mirrors config's helper for the serve address.
@@ -447,6 +485,27 @@ func runImportGraph(path string) {
 	}
 	fmt.Printf("imported %s — %d nodes, %d edges, %d layers, %d tour-steps into %s\n",
 		path, st.Nodes, st.Edges, st.Layers, st.TourSteps, cfg.KnowledgeDBPath)
+}
+
+// runImportSchema extracts an object model from a SQL schema (DDL) into the graph.
+func runImportSchema(path string) {
+	if strings.TrimSpace(path) == "" {
+		fail("usage: oss-agent import-schema <schema.sql>")
+	}
+	cfg := config.Load()
+	if cfg.EmbAPIKey == "" {
+		fail("set OSS_EMB_API_KEY (or OSS_LLM_API_KEY) for embeddings")
+	}
+	store, err := knowledge.Open(cfg.KnowledgeDBPath, cfg.EmbBaseURL, cfg.EmbAPIKey, cfg.EmbModel, cfg.EmbDim)
+	if err != nil {
+		fail("open knowledge: %v", err)
+	}
+	defer store.Close()
+	st, err := schemaimport.Import(context.Background(), store, path)
+	if err != nil {
+		fail("import schema: %v", err)
+	}
+	fmt.Printf("imported %s — %d tables, %d foreign keys into %s\n", path, st.Tables, st.FKs, cfg.KnowledgeDBPath)
 }
 
 // runSearch queries the knowledge base directly (no LLM) — useful to verify ingest.

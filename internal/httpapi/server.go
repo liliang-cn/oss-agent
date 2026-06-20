@@ -4,11 +4,13 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -30,35 +32,67 @@ type Server struct {
 	store      *knowledge.Store
 	dom        *domain.Domain
 	convMemory bool       // cross-session conversation memory on /chat
+	static     fs.FS      // embedded web UI (may be nil)
 	mu         sync.Mutex // serializes LLM agent runs (one ReAct loop at a time)
 }
 
 // New builds a Server. Pass svc=nil for a search-only (no-LLM) deployment.
 // convMemory enables cross-session semantic recall of past chat turns on /chat.
-func New(svc *agent.Service, store *knowledge.Store, dom *domain.Domain, convMemory bool) *Server {
-	return &Server{svc: svc, store: store, dom: dom, convMemory: convMemory}
+// static, when non-nil, is the built web UI served at / (API lives under /api).
+func New(svc *agent.Service, store *knowledge.Store, dom *domain.Domain, convMemory bool, static fs.FS) *Server {
+	return &Server{svc: svc, store: store, dom: dom, convMemory: convMemory, static: static}
 }
 
-// Routes returns the HTTP handler with all endpoints mounted.
+// Routes mounts the JSON API under /api and the embedded web UI at /.
 func (s *Server) Routes() http.Handler {
+	api := http.NewServeMux()
+	api.HandleFunc("/healthz", s.handleHealth)
+	api.HandleFunc("/ask", s.handleAsk)
+	api.HandleFunc("/ask/stream", s.handleAskStream)   // SSE token stream
+	api.HandleFunc("/diagnose", s.handleAsk)           // same loop, troubleshooting framing
+	api.HandleFunc("/chat", s.handleChat)              // multi-turn (session history kept)
+	api.HandleFunc("/chat/stream", s.handleChatStream) // multi-turn, raw text stream (Vercel AI SDK)
+	api.HandleFunc("/search", s.handleSearch)
+	api.HandleFunc("/search-graph", s.handleSearchGraph)
+	api.HandleFunc("/graph/all", s.handleGraphAll)       // entire graph
+	api.HandleFunc("/graph", s.handleGraph)              // subgraph seeded by ?q=
+	api.HandleFunc("/graph/expand", s.handleGraphExpand) // one-hop expand ?id=
+	api.HandleFunc("/analyze-log", s.handleAnalyzeLog)
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", s.handleHealth)
-	mux.HandleFunc("/ask", s.handleAsk)
-	mux.HandleFunc("/ask/stream", s.handleAskStream) // SSE token stream
-	mux.HandleFunc("/diagnose", s.handleAsk)         // same loop, troubleshooting framing
-	mux.HandleFunc("/chat", s.handleChat)            // multi-turn (session history kept)
-	mux.HandleFunc("/search", s.handleSearch)
-	mux.HandleFunc("/search-graph", s.handleSearchGraph)
-	mux.HandleFunc("/analyze-log", s.handleAnalyzeLog)
+	mux.Handle("/api/", http.StripPrefix("/api", api))
+	if s.static != nil {
+		mux.Handle("/", spaHandler(s.static))
+	}
 	return logRequests(mux)
+}
+
+// spaHandler serves static files from fsys, falling back to index.html so the
+// single-page app loads at any path.
+func spaHandler(fsys fs.FS) http.Handler {
+	fileServer := http.FileServer(http.FS(fsys))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := strings.TrimPrefix(r.URL.Path, "/")
+		if p == "" {
+			p = "index.html"
+		}
+		if _, err := fs.Stat(fsys, p); err != nil {
+			r2 := r.Clone(r.Context())
+			r2.URL.Path = "/"
+			http.ServeFileFS(w, r2, fsys, "index.html")
+			return
+		}
+		fileServer.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status":  "ok",
-		"domain":  s.dom.Name,
-		"probes":  len(s.dom.Probes),
-		"llm":     s.svc != nil,
+		"status": "ok",
+		"domain": s.dom.Name,
+		"title":  s.dom.Title,
+		"probes": len(s.dom.Probes),
+		"llm":    s.svc != nil,
 	})
 }
 
@@ -171,6 +205,137 @@ func truncate(s string, n int) string {
 		return s[:n] + "…"
 	}
 	return s
+}
+
+// augmentWithRecall prepends cross-session recalled context to a message (when
+// enabled) and returns the augmented message plus the recall count.
+func (s *Server) augmentWithRecall(ctx context.Context, msg string) (string, int) {
+	if !s.convMemory {
+		return msg, 0
+	}
+	turns, err := s.store.RecallTurns(ctx, msg, 4)
+	if err != nil || len(turns) == 0 {
+		return msg, 0
+	}
+	var b strings.Builder
+	b.WriteString("Context recalled from earlier conversations (use if relevant, otherwise ignore):\n")
+	for _, t := range turns {
+		b.WriteString(fmt.Sprintf("- [%s] %s\n", t.Role, truncate(t.Content, 240)))
+	}
+	b.WriteString("\nCurrent message:\n")
+	b.WriteString(msg)
+	return b.String(), len(turns)
+}
+
+// aiMessage matches the Vercel AI SDK useChat POST body ({messages:[{role,content}]}).
+type aiChatBody struct {
+	Messages []struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	} `json:"messages"`
+	Message   string `json:"message"`
+	SessionID string `json:"session_id"`
+}
+
+// handleChatStream is /chat for the Vercel AI SDK: it accepts the SDK's
+// {messages,...} body (or {message}), runs the agent under session_id, and writes
+// the answer as a raw text stream (AI SDK streamProtocol:'text'). Cross-session
+// recall + persistence apply. session_id echoes back via the X-Session-Id header.
+func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "use POST")
+		return
+	}
+	if s.svc == nil {
+		writeErr(w, http.StatusServiceUnavailable, "no LLM configured: set OSS_LLM_API_KEY")
+		return
+	}
+	var body aiChatBody
+	if !readJSON(w, r, &body) {
+		return
+	}
+	userMsg := strings.TrimSpace(body.Message)
+	if userMsg == "" {
+		for i := len(body.Messages) - 1; i >= 0; i-- {
+			if body.Messages[i].Role == "user" {
+				userMsg = strings.TrimSpace(body.Messages[i].Content)
+				break
+			}
+		}
+	}
+	if userMsg == "" {
+		writeErr(w, http.StatusBadRequest, "no user message")
+		return
+	}
+	sid := strings.TrimSpace(body.SessionID)
+	if sid == "" {
+		sid = newSessionID()
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeErr(w, http.StatusInternalServerError, "streaming unsupported")
+		return
+	}
+
+	message, recalled := s.augmentWithRecall(r.Context(), userMsg)
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("X-Session-Id", sid)
+	w.Header().Set("X-Recalled", fmt.Sprintf("%d", recalled))
+	w.Header().Set("Cache-Control", "no-cache")
+	w.WriteHeader(http.StatusOK)
+
+	// Real streaming via RunStream: forward token deltas when the model speaks the
+	// answer; when it returns the answer via task_complete (no token events), the
+	// fixed agent-go runtime delivers it as the final EventTypeComplete, which we
+	// flush in chunks so the client still sees a progressive reveal.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	events, err := s.svc.RunStream(r.Context(), message)
+	if err != nil {
+		io.WriteString(w, "[error] "+err.Error())
+		flusher.Flush()
+		return
+	}
+	var streamed bool
+	var full, final string
+	for ev := range events {
+		switch ev.Type {
+		case agent.EventTypePartial:
+			if ev.Content != "" {
+				streamed = true
+				full += ev.Content
+				io.WriteString(w, ev.Content)
+				flusher.Flush()
+			}
+		case agent.EventTypeComplete:
+			final = ev.Content
+		}
+	}
+	if !streamed && final != "" {
+		full = final
+		for _, ch := range chunkText(final, 18) {
+			io.WriteString(w, ch)
+			flusher.Flush()
+		}
+	}
+	if s.convMemory && full != "" {
+		_ = s.store.SaveTurn(context.Background(), sid, "user", userMsg)
+		_ = s.store.SaveTurn(context.Background(), sid, "assistant", full)
+	}
+}
+
+// chunkText splits s into ~n-rune pieces (rune boundaries) for incremental flush.
+func chunkText(s string, n int) []string {
+	r := []rune(s)
+	var out []string
+	for i := 0; i < len(r); i += n {
+		end := i + n
+		if end > len(r) {
+			end = len(r)
+		}
+		out = append(out, string(r[i:end]))
+	}
+	return out
 }
 
 // handleAskStream streams the answer token-by-token over Server-Sent Events.
@@ -300,6 +465,43 @@ func (s *Server) handleSearchGraph(w http.ResponseWriter, r *http.Request) {
 		"hits":              gr.Hits,
 		"related_via_graph": gr.Neighbors,
 	})
+}
+
+func (s *Server) handleGraphAll(w http.ResponseWriter, r *http.Request) {
+	gv, err := s.store.AllGraph(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "graph failed: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, gv)
+}
+
+func (s *Server) handleGraph(w http.ResponseWriter, r *http.Request) {
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	if q == "" {
+		writeErr(w, http.StatusBadRequest, "q is required")
+		return
+	}
+	gv, err := s.store.QueryGraph(r.Context(), q, 6)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "graph failed: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, gv)
+}
+
+func (s *Server) handleGraphExpand(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		writeErr(w, http.StatusBadRequest, "id is required")
+		return
+	}
+	gv, err := s.store.ExpandNode(r.Context(), id)
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, "expand failed: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, gv)
 }
 
 // handleAnalyzeLog triages a log. It accepts either a multipart upload (field

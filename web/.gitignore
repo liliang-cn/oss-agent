@@ -1,0 +1,4 @@
+node_modules/
+*.local
+.DS_Store
+# dist/ is committed so `go build` can embed the UI from a clean checkout

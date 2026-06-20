@@ -4,6 +4,7 @@
 # OSS_DOMAIN_FILE — no platform source changes needed.
 
 name = "LINBIT (DRBD/LINSTOR)"
+title = "LINBIT knowledge"
 
 persona = '''
 You are LINBIT-Ops, an expert SRE copilot for DRBD and LINSTOR software-defined

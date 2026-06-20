@@ -7,16 +7,23 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"unicode"
 
 	"github.com/liliang-cn/cortexdb/v2/pkg/cortexdb"
 
 	"github.com/liliang-cn/oss-agent/internal/extract"
 )
+
+// extractConcurrency bounds parallel LLM ontology-extraction calls during
+// ingest. The gateway permits ~10 concurrent requests; sequential extraction is
+// otherwise the dominant ingest cost.
+const extractConcurrency = 10
 
 // Store is the GraphRAG knowledge base.
 type Store struct {
@@ -54,7 +61,6 @@ func (s *Store) IngestDoc(ctx context.Context, id, title, content string) error 
 	})
 	return err
 }
-
 
 // Hit is a retrieved knowledge chunk.
 type Hit struct {
@@ -253,6 +259,189 @@ func (s *Store) PurgeSource(ctx context.Context, docMatch string, prefix bool) (
 	return len(embIDs), res.SuccessCount, nil
 }
 
+// ── graph view (for the knowledge-graph explorer UI) ──
+
+// GraphViewNode / GraphViewEdge / GraphView are a renderable subgraph.
+type GraphViewNode struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+	Type  string `json:"type"`
+	File  string `json:"file,omitempty"`
+	Seed  bool   `json:"seed,omitempty"`
+}
+type GraphViewEdge struct {
+	Source string `json:"source"`
+	Target string `json:"target"`
+	Type   string `json:"type"`
+}
+type GraphView struct {
+	Nodes []GraphViewNode `json:"nodes"`
+	Edges []GraphViewEdge `json:"edges"`
+}
+
+const graphViewMaxNodes = 60
+
+// graphExploreEdgeTypes widens expansion for the explorer to include the
+// uppercase DOMAIN relations (from LLM ontology extraction) alongside the code
+// edges, so concept subgraphs (ResourceGroup ─CONTAINS→ Resource) are traversed.
+var graphExploreEdgeTypes = append(append([]string{}, codeEdgeTypes...),
+	"CONTAINS", "MANAGES", "DEPLOYED_ON", "DEPENDS_ON", "RESOLVES",
+	"DEFINED_IN", "TRIGGERED_BY", "MUTUALLY_EXCLUSIVE", "TRIGGERED_IN_STATE",
+	"REFERENCES") // REFERENCES = SQL foreign keys (object model from schema import)
+
+// AllGraph returns the entire knowledge graph (all entity nodes + edges) for the
+// full-graph explorer view. Reads directly via SQL since there's no query seed.
+func (s *Store) AllGraph(ctx context.Context) (*GraphView, error) {
+	gv := &GraphView{}
+	sqldb := s.db.SQL()
+	rows, err := sqldb.QueryContext(ctx, `SELECT id, content, node_type, properties FROM graph_nodes`)
+	if err != nil {
+		return nil, fmt.Errorf("query nodes: %w", err)
+	}
+	have := make(map[string]struct{})
+	for rows.Next() {
+		var id, content, ntype, props string
+		if err := rows.Scan(&id, &content, &ntype, &props); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		n := GraphViewNode{ID: id, Label: content, Type: ntype}
+		if props != "" {
+			var p map[string]interface{}
+			if json.Unmarshal([]byte(props), &p) == nil {
+				if v, ok := p["name"].(string); ok && v != "" {
+					n.Label = v
+				}
+				if v, ok := p["file_path"].(string); ok {
+					n.File = v
+				}
+			}
+		}
+		gv.Nodes = append(gv.Nodes, n)
+		have[id] = struct{}{}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	erows, err := sqldb.QueryContext(ctx, `SELECT from_node_id, to_node_id, edge_type FROM graph_edges`)
+	if err != nil {
+		return nil, fmt.Errorf("query edges: %w", err)
+	}
+	defer erows.Close()
+	for erows.Next() {
+		var from, to, etype string
+		if err := erows.Scan(&from, &to, &etype); err != nil {
+			return nil, err
+		}
+		if _, ok := have[from]; !ok {
+			continue
+		}
+		if _, ok := have[to]; !ok {
+			continue
+		}
+		gv.Edges = append(gv.Edges, GraphViewEdge{Source: from, Target: to, Type: etype})
+	}
+	return gv, erows.Err()
+}
+
+// QueryGraph returns a small subgraph seeded by a search query: the matched code
+// entities plus their one-hop code-edge neighbors (nodes + edges), for the explorer.
+func (s *Store) QueryGraph(ctx context.Context, query string, topK int) (*GraphView, error) {
+	if topK <= 0 {
+		topK = 6
+	}
+	results, err := s.db.HybridSearchText(ctx, query, topK)
+	if err != nil {
+		return nil, err
+	}
+	seedSet := make(map[string]struct{})
+	for _, r := range results { // vector hits → code entities
+		if r.ID != "" {
+			seedSet[graphEntityID(r.ID)] = struct{}{}
+		}
+	}
+	// Also seed by graph-node name: domain-concept entities (from LLM ontology
+	// extraction) have no embeddings, so vector search misses them — match by label.
+	if rows, e := s.db.SQL().QueryContext(ctx,
+		`SELECT id FROM graph_nodes WHERE lower(content) LIKE ?
+		 ORDER BY CASE WHEN node_type IN
+		   ('Table','Resource','ResourceGroup','Volume','StoragePool','Node','Cluster','ErrorCode','State','CLI_Command','ConfigParameter','KernelModule')
+		   THEN 0 ELSE 1 END
+		 LIMIT 20`,
+		"%"+strings.ToLower(query)+"%"); e == nil {
+		for rows.Next() {
+			var id string
+			if rows.Scan(&id) == nil {
+				seedSet[id] = struct{}{}
+			}
+		}
+		rows.Close()
+	}
+	if len(seedSet) == 0 {
+		return &GraphView{}, nil
+	}
+	seeds := make([]string, 0, len(seedSet))
+	for id := range seedSet {
+		seeds = append(seeds, id)
+	}
+	exp, err := s.tb.ExpandGraph(ctx, cortexdb.ToolExpandGraphRequest{
+		NodeIDs: seeds, MaxHops: 1, EdgeTypes: graphExploreEdgeTypes, Limit: 8,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return graphViewFrom(exp, seedSet), nil
+}
+
+// ExpandNode returns the one-hop neighborhood of a single graph node (click-to-expand).
+func (s *Store) ExpandNode(ctx context.Context, id string) (*GraphView, error) {
+	exp, err := s.tb.ExpandGraph(ctx, cortexdb.ToolExpandGraphRequest{
+		NodeIDs: []string{id}, MaxHops: 1, EdgeTypes: graphExploreEdgeTypes, Limit: 14,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return graphViewFrom(exp, map[string]struct{}{id: {}}), nil
+}
+
+func graphViewFrom(exp *cortexdb.ToolExpandGraphResponse, seedSet map[string]struct{}) *GraphView {
+	gv := &GraphView{}
+	have := make(map[string]struct{})
+	for _, n := range exp.Nodes {
+		if n == nil || n.ID == "" {
+			continue
+		}
+		if len(gv.Nodes) >= graphViewMaxNodes {
+			break
+		}
+		node := GraphViewNode{ID: n.ID, Label: n.Content, Type: n.NodeType}
+		if p := n.Properties; p != nil {
+			if v, ok := p["name"].(string); ok && v != "" {
+				node.Label = v
+			}
+			if v, ok := p["file_path"].(string); ok {
+				node.File = v
+			}
+		}
+		if _, ok := seedSet[n.ID]; ok {
+			node.Seed = true
+		}
+		gv.Nodes = append(gv.Nodes, node)
+		have[n.ID] = struct{}{}
+	}
+	for _, e := range exp.Edges {
+		if _, ok := have[e.FromNodeID]; !ok {
+			continue
+		}
+		if _, ok := have[e.ToNodeID]; !ok {
+			continue
+		}
+		gv.Edges = append(gv.Edges, GraphViewEdge{Source: e.FromNodeID, Target: e.ToNodeID, Type: e.EdgeType})
+	}
+	return gv
+}
+
 // ── cross-session conversation memory (cortexdb Memory API) ──
 
 // convNamespace buckets all chat turns into one global, cross-session pool so a
@@ -365,32 +554,66 @@ func chunk(text string, size int) []string {
 // configured embedder), and — when ex != nil — extracts an ontology fragment per
 // chunk (entities + relations) into the knowledge graph. Requires an embedder.
 func (s *Store) IngestSemantic(ctx context.Context, docID, title, content string, ex *extract.Extractor) error {
-	for i, ch := range chunk(content, 1200) {
+	chunks := chunk(content, 1200)
+	if len(chunks) == 0 {
+		return nil
+	}
+	// 1. embed + store vectors in one batched call (the embedder sub-batches
+	//    to a provider-safe size internally).
+	texts := make(map[string]string, len(chunks))
+	for i, ch := range chunks {
+		texts[fmt.Sprintf("%s#%d", docID, i)] = ch
+	}
+	if err := s.db.InsertTextBatch(ctx, texts, map[string]string{"document_id": docID, "title": title}); err != nil {
+		return fmt.Errorf("embed chunks: %w", err)
+	}
+	if ex == nil {
+		return nil
+	}
+
+	// 2. LLM ontology extraction — run concurrently (the gateway permits ~N
+	//    parallel requests), since one call per chunk is otherwise the bottleneck.
+	type frag struct {
+		chunkID string
+		tr      *extract.Triples
+	}
+	sem := make(chan struct{}, extractConcurrency)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	frags := make([]frag, 0, len(chunks))
+	for i, ch := range chunks {
 		chunkID := fmt.Sprintf("%s#%d", docID, i)
-		meta := map[string]string{"document_id": docID, "title": title, "chunk": fmt.Sprintf("%d", i)}
-		if err := s.db.InsertText(ctx, chunkID, ch, meta); err != nil {
-			return fmt.Errorf("embed chunk %s: %w", chunkID, err)
-		}
-		if ex == nil {
-			continue
-		}
-		tr, err := ex.Extract(ctx, ch)
-		if err != nil || tr == nil { // extraction is best-effort; never fail ingest on it
-			continue
-		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(id, text string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			tr, err := ex.Extract(ctx, text)
+			if err != nil || tr == nil {
+				return // extraction is best-effort; never fail ingest on it
+			}
+			mu.Lock()
+			frags = append(frags, frag{id, tr})
+			mu.Unlock()
+		}(chunkID, ch)
+	}
+	wg.Wait()
+
+	// 3. upsert the extracted ontology (serialized — single SQLite writer).
+	for _, f := range frags {
 		var ents []cortexdb.ToolEntityInput
-		for _, e := range tr.Entities {
+		for _, e := range f.tr.Entities {
 			if e.Name != "" {
-				ents = append(ents, cortexdb.ToolEntityInput{Name: e.Name, Type: e.Type, Description: e.Description, ChunkIDs: []string{chunkID}})
+				ents = append(ents, cortexdb.ToolEntityInput{Name: e.Name, Type: e.Type, Description: e.Description, ChunkIDs: []string{f.chunkID}})
 			}
 		}
 		if len(ents) > 0 {
 			_, _ = s.tb.UpsertEntities(ctx, cortexdb.ToolUpsertEntitiesRequest{DocumentID: docID, Entities: ents})
 		}
 		var rels []cortexdb.ToolRelationInput
-		for _, r := range tr.Relations {
+		for _, r := range f.tr.Relations {
 			if r.From != "" && r.To != "" {
-				rels = append(rels, cortexdb.ToolRelationInput{From: r.From, To: r.To, Type: r.Type, ChunkIDs: []string{chunkID}})
+				rels = append(rels, cortexdb.ToolRelationInput{From: r.From, To: r.To, Type: r.Type, ChunkIDs: []string{f.chunkID}})
 			}
 		}
 		if len(rels) > 0 {
