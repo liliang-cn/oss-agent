@@ -69,6 +69,25 @@ type Stats struct {
 
 const batchSize = 64
 
+// DocIDFor returns the document_id that Import uses for a knowledge-graph.json
+// (so callers can purge the prior import before re-importing). It is "ua:<name>",
+// where name is the graph's name field or the file basename.
+func DocIDFor(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", path, err)
+	}
+	var g graph
+	if err := json.Unmarshal(b, &g); err != nil {
+		return "", fmt.Errorf("parse graph: %w", err)
+	}
+	name := g.Name
+	if name == "" {
+		name = strings.TrimSuffix(filepath.Base(path), ".json")
+	}
+	return "ua:" + name, nil
+}
+
 // Import reads a knowledge-graph.json and loads it (faithfully) into the store.
 func Import(ctx context.Context, store *knowledge.Store, path string) (Stats, error) {
 	var st Stats

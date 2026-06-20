@@ -202,6 +202,55 @@ func (s *Store) SearchGraph(ctx context.Context, query string, topK int) (*Graph
 	return res, nil
 }
 
+// PurgeSource removes every embedding belonging to a source, plus (for code
+// sources) the derived graph entity nodes and — via FK cascade — their edges.
+// The source is identified by its embedding metadata document_id: exact match, or
+// a prefix match (text sources store one document_id per file under "<name>/...").
+// Catches deletions too: it enumerates what's actually in the DB, not the source.
+func (s *Store) PurgeSource(ctx context.Context, docMatch string, prefix bool) (embCount, nodeCount int, err error) {
+	sqldb := s.db.SQL()
+	q := `SELECT id FROM embeddings WHERE json_extract(metadata,'$.document_id') = ?`
+	arg := docMatch
+	if prefix {
+		q = `SELECT id FROM embeddings WHERE json_extract(metadata,'$.document_id') LIKE ?`
+		arg = docMatch + "%"
+	}
+	rows, err := sqldb.QueryContext(ctx, q, arg)
+	if err != nil {
+		return 0, 0, fmt.Errorf("query source ids: %w", err)
+	}
+	var embIDs []string
+	nodeSet := make(map[string]struct{})
+	for rows.Next() {
+		var id string
+		if scanErr := rows.Scan(&id); scanErr != nil {
+			rows.Close()
+			return 0, 0, scanErr
+		}
+		embIDs = append(embIDs, id)
+		nodeSet[graphEntityID(id)] = struct{}{}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, 0, err
+	}
+	if len(embIDs) == 0 {
+		return 0, 0, nil
+	}
+	if err := s.db.Vector().DeleteBatch(ctx, embIDs); err != nil {
+		return 0, 0, fmt.Errorf("delete embeddings: %w", err)
+	}
+	nodeIDs := make([]string, 0, len(nodeSet))
+	for id := range nodeSet {
+		nodeIDs = append(nodeIDs, id)
+	}
+	res, derr := s.db.Graph().DeleteNodesBatch(ctx, nodeIDs)
+	if derr != nil {
+		return len(embIDs), 0, fmt.Errorf("delete graph nodes: %w", derr)
+	}
+	return len(embIDs), res.SuccessCount, nil
+}
+
 // graphEntityID mirrors cortexdb's graphEntityNodeID: lowercase, keep letters and
 // digits, map space/-/_ to '_', drop everything else, prefix "entity:". This lets
 // us turn a raw chunk/node id into the normalized id under which the graph stores

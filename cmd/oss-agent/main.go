@@ -39,6 +39,8 @@ func main() {
 		runIngest(strings.Join(os.Args[2:], " "))
 	case "ingest-repo":
 		runIngestRepo(strings.Join(os.Args[2:], " "))
+	case "refresh":
+		runRefresh(strings.Join(os.Args[2:], " "))
 	case "import-graph":
 		runImportGraph(strings.Join(os.Args[2:], " "))
 	case "search":
@@ -195,6 +197,75 @@ func runIngestRepo(arg string) {
 	}
 	fmt.Printf("ingested %s — %d docs, %d code files, %d error strings, %d skipped\n",
 		name, st.DocFiles, st.CodeFiles, st.ErrorStrings, st.Skipped)
+}
+
+// runRefresh cleanly updates a single source in place: it purges that source's
+// existing chunks (and code graph nodes/edges) — catching deletions, not just
+// changes — then re-imports it. Mirrors ingest-repo's argument (git url or local
+// dir). Only the named source is touched; the other sources are untouched.
+func runRefresh(arg string) {
+	if strings.TrimSpace(arg) == "" {
+		fail("usage: oss-agent refresh <git-url|local-dir>")
+	}
+	cfg := config.Load()
+	if cfg.EmbAPIKey == "" {
+		fail("set OSS_EMB_API_KEY (or OSS_LLM_API_KEY) for embeddings")
+	}
+	store, err := knowledge.Open(cfg.KnowledgeDBPath, cfg.EmbBaseURL, cfg.EmbAPIKey, cfg.EmbModel, cfg.EmbDim)
+	if err != nil {
+		fail("open knowledge: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	// resolve dir + name (clone if a URL), same as ingest-repo
+	dir, name := arg, filepath.Base(strings.TrimRight(arg, "/"))
+	if strings.HasPrefix(arg, "http://") || strings.HasPrefix(arg, "https://") || strings.HasSuffix(arg, ".git") {
+		name = strings.TrimSuffix(filepath.Base(arg), ".git")
+		dir = filepath.Join("repos", name)
+		if _, statErr := os.Stat(dir); os.IsNotExist(statErr) {
+			fmt.Printf("[1/3] cloning %s → %s (shallow)\n", arg, dir)
+			cmd := exec.CommandContext(ctx, "git", "clone", "--depth", "1", arg, dir)
+			cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+			if e := cmd.Run(); e != nil {
+				fail("git clone: %v", e)
+			}
+		}
+	}
+
+	graphPath := filepath.Join(dir, ".understand-anything", "knowledge-graph.json")
+	if fileExists(graphPath) {
+		// code source: purge by exact document_id, then re-import the graph
+		docID, e := graphimport.DocIDFor(graphPath)
+		if e != nil {
+			fail("resolve doc id: %v", e)
+		}
+		embN, nodeN, e := store.PurgeSource(ctx, docID, false)
+		if e != nil {
+			fail("purge %s: %v", docID, e)
+		}
+		fmt.Printf("[purge] %s — removed %d chunks, %d graph nodes\n", docID, embN, nodeN)
+		st, e := graphimport.Import(ctx, store, graphPath)
+		if e != nil {
+			fail("import graph: %v", e)
+		}
+		fmt.Printf("[reimport] %d nodes, %d edges, %d layers\n", st.Nodes, st.Edges, st.Layers)
+		return
+	}
+
+	// text source: purge by document_id prefix "<name>/", then re-ingest
+	embN, _, e := store.PurgeSource(ctx, name+"/", true)
+	if e != nil {
+		fail("purge %s: %v", name, e)
+	}
+	fmt.Printf("[purge] %s/* — removed %d chunks\n", name, embN)
+	dom := loadDomain(cfg)
+	ex := agents.BuildExtractor(cfg, dom)
+	st, e := ingest.Repo(ctx, store, dir, name, dom, ex)
+	if e != nil {
+		fail("ingest repo: %v", e)
+	}
+	fmt.Printf("[reingest] %s — %d docs, %d code files, %d error strings\n", name, st.DocFiles, st.CodeFiles, st.ErrorStrings)
 }
 
 func fileExists(p string) bool {
@@ -424,6 +495,7 @@ usage:
   oss-agent analyze-log <path>  triage a log file / dir / .tar.gz / .zip, then AI diagnosis
   oss-agent ingest <dir>        ingest *.md docs from a directory
   oss-agent ingest-repo <url>   one-liner: clone → understand → import (graph)
+  oss-agent refresh <url|dir>   purge one source (catches deletions) and re-import it
   oss-agent import-graph <f>    import an Understand-Anything knowledge-graph.json
   oss-agent check <command...>  test a command against the red-line safety wall
   oss-agent version

@@ -50,8 +50,10 @@ oss-agent chat                 multi-turn (history kept across turns)
 oss-agent analyze-log <path>   triage a log file / dir / .tar.gz / .zip, + AI diagnosis
 oss-agent ingest <dir>         ingest *.md docs
 oss-agent ingest-repo <url>    clone → understand → import (graph), or text fallback
+oss-agent refresh <url|dir>    purge one source (catches deletions) and re-import it
 oss-agent import-graph <f>     import an Understand-Anything knowledge-graph.json
 oss-agent search <query>       query the knowledge base directly (no LLM)
+oss-agent search-graph <query> search + one-hop graph expansion (calls/contains/…)
 oss-agent check <command...>   test a command against the red-line wall
 oss-agent domain               print the loaded domain config
 ```
