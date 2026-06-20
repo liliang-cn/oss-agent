@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -325,7 +326,8 @@ func runServe(openUI bool) {
 
 	addr := env("OSS_HTTP_ADDR", ":7634")
 	convMem := svc != nil && env("OSS_CONV_MEMORY", "on") != "off"
-	srv := httpapi.New(svc, store, dom, convMem, static)
+	rlPerMin := envInt("OSS_RATE_LIMIT_PER_MIN", 30) // per-IP LLM-endpoint cap; 0 = unlimited
+	srv := httpapi.New(svc, store, dom, convMem, static, rlPerMin)
 	fmt.Printf("oss-agent serving %s on %s  (llm=%v, probes=%d, conv_memory=%v, ui=%v)\n", dom.Name, addr, svc != nil, len(dom.Probes), convMem, static != nil)
 	fmt.Println("API under /api/* ; web UI at / (if built)")
 
@@ -356,6 +358,16 @@ func openBrowser(url string) {
 func env(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return def
+}
+
+// envInt reads an integer env var with a default.
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
 	}
 	return def
 }

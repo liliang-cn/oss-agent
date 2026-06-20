@@ -11,11 +11,13 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/liliang-cn/agent-go/v2/pkg/agent"
 
@@ -33,31 +35,88 @@ type Server struct {
 	dom        *domain.Domain
 	convMemory bool       // cross-session conversation memory on /chat
 	static     fs.FS      // embedded web UI (may be nil)
+	limiter    *ipLimiter // per-IP rate limit on LLM endpoints
 	mu         sync.Mutex // serializes LLM agent runs (one ReAct loop at a time)
 }
 
 // New builds a Server. Pass svc=nil for a search-only (no-LLM) deployment.
 // convMemory enables cross-session semantic recall of past chat turns on /chat.
 // static, when non-nil, is the built web UI served at / (API lives under /api).
-func New(svc *agent.Service, store *knowledge.Store, dom *domain.Domain, convMemory bool, static fs.FS) *Server {
-	return &Server{svc: svc, store: store, dom: dom, convMemory: convMemory, static: static}
+// rlPerMin caps LLM-endpoint requests per client IP per minute (0 = unlimited).
+func New(svc *agent.Service, store *knowledge.Store, dom *domain.Domain, convMemory bool, static fs.FS, rlPerMin int) *Server {
+	return &Server{svc: svc, store: store, dom: dom, convMemory: convMemory, static: static, limiter: newIPLimiter(rlPerMin)}
+}
+
+// ── per-IP rate limiter (sliding 60s window) ──
+
+type ipLimiter struct {
+	mu     sync.Mutex
+	perMin int
+	hits   map[string][]int64
+}
+
+func newIPLimiter(perMin int) *ipLimiter {
+	return &ipLimiter{perMin: perMin, hits: make(map[string][]int64)}
+}
+
+func (l *ipLimiter) allow(ip string) bool {
+	if l.perMin <= 0 {
+		return true
+	}
+	now := time.Now().Unix()
+	cutoff := now - 60
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	kept := l.hits[ip][:0]
+	for _, t := range l.hits[ip] {
+		if t > cutoff {
+			kept = append(kept, t)
+		}
+	}
+	if len(kept) >= l.perMin {
+		l.hits[ip] = kept
+		return false
+	}
+	l.hits[ip] = append(kept, now)
+	return true
+}
+
+func clientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		return strings.TrimSpace(strings.Split(xff, ",")[0])
+	}
+	if h, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return h
+	}
+	return r.RemoteAddr
+}
+
+// limited wraps an LLM-endpoint handler with the per-IP rate limit.
+func (s *Server) limited(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.limiter.allow(clientIP(r)) {
+			writeErr(w, http.StatusTooManyRequests, "rate limit exceeded — slow down")
+			return
+		}
+		next(w, r)
+	}
 }
 
 // Routes mounts the JSON API under /api and the embedded web UI at /.
 func (s *Server) Routes() http.Handler {
 	api := http.NewServeMux()
 	api.HandleFunc("/healthz", s.handleHealth)
-	api.HandleFunc("/ask", s.handleAsk)
-	api.HandleFunc("/ask/stream", s.handleAskStream)   // SSE token stream
-	api.HandleFunc("/diagnose", s.handleAsk)           // same loop, troubleshooting framing
-	api.HandleFunc("/chat", s.handleChat)              // multi-turn (session history kept)
-	api.HandleFunc("/chat/stream", s.handleChatStream) // multi-turn, raw text stream (Vercel AI SDK)
+	api.HandleFunc("/ask", s.limited(s.handleAsk))
+	api.HandleFunc("/ask/stream", s.limited(s.handleAskStream))   // SSE token stream
+	api.HandleFunc("/diagnose", s.limited(s.handleAsk))           // same loop, troubleshooting framing
+	api.HandleFunc("/chat", s.limited(s.handleChat))              // multi-turn (session history kept)
+	api.HandleFunc("/chat/stream", s.limited(s.handleChatStream)) // multi-turn, raw text stream (Vercel AI SDK)
 	api.HandleFunc("/search", s.handleSearch)
 	api.HandleFunc("/search-graph", s.handleSearchGraph)
 	api.HandleFunc("/graph/all", s.handleGraphAll)       // entire graph
 	api.HandleFunc("/graph", s.handleGraph)              // subgraph seeded by ?q=
 	api.HandleFunc("/graph/expand", s.handleGraphExpand) // one-hop expand ?id=
-	api.HandleFunc("/analyze-log", s.handleAnalyzeLog)
+	api.HandleFunc("/analyze-log", s.limited(s.handleAnalyzeLog))
 
 	mux := http.NewServeMux()
 	mux.Handle("/api/", http.StripPrefix("/api", api))
