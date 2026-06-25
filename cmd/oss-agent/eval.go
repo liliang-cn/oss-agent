@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	evalgo "github.com/liliang-cn/eval-go"
 	"github.com/liliang-cn/eval-go/llmjudge"
@@ -33,16 +34,26 @@ type evalCase struct {
 func runEval(args []string) {
 	fs := flag.NewFlagSet("eval", flag.ExitOnError)
 	out := fs.String("out", "", "also write the JSON report to this file")
-	topK := fs.Int("k", 6, "knowledge chunks retrieved as context per question")
+	topK := fs.Int("k", 4, "knowledge chunks retrieved as context per question (matches the agent's knowledge_search)")
 	conc := fs.Int("concurrency", 2, "parallel judge evaluations")
 	failUnder := fs.Float64("fail-under", 0, "exit non-zero if any metric's pass-rate is below this (0 = off)")
-	_ = fs.Parse(args)
-	if fs.NArg() < 1 {
-		fail("usage: oss-agent eval <dataset.json> [-out report.json] [-k 6] [-fail-under 0.8]\n" +
+	// flag stops at the first positional, so a leading dataset path would swallow
+	// any flags after it. Pull a leading non-flag arg out first so order is free.
+	dsArg := ""
+	rest := args
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		dsArg, rest = args[0], args[1:]
+	}
+	_ = fs.Parse(rest)
+	if dsArg == "" {
+		dsArg = fs.Arg(0)
+	}
+	if dsArg == "" {
+		fail("usage: oss-agent eval <dataset.json> [-k 4] [-out report.json] [-fail-under 0.8]\n" +
 			"  dataset: a JSON array of {name, question, category?, meta?} (or {\"cases\":[...]})")
 	}
 
-	cases := loadEvalDataset(fs.Arg(0))
+	cases := loadEvalDataset(dsArg)
 	if len(cases) == 0 {
 		fail("dataset %s has no cases", fs.Arg(0))
 	}

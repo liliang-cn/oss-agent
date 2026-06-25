@@ -144,7 +144,7 @@ func registerKnowledgeSearch(svc *agent.Service, store *knowledge.Store) {
 		params,
 		func(ctx context.Context, args map[string]interface{}) (interface{}, error) {
 			query, _ := args["query"].(string)
-			gr, err := store.SearchGraph(ctx, query, 6)
+			gr, err := store.SearchGraph(ctx, query, 4)
 			if err != nil {
 				return map[string]interface{}{"ok": false, "error": err.Error()}, nil
 			}

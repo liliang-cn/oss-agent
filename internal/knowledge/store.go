@@ -25,6 +25,35 @@ import (
 // lexically on-topic results above purely vector-similar ones.
 var searchReranker = core.NewKeywordMatchReranker(0.3)
 
+// relevanceFloor keeps a retrieved chunk only if its reranked score is at least
+// this fraction of the top chunk's score — a query-relative relevance gate.
+const relevanceFloor = 0.6
+
+// pruneByRelevance drops candidates below relevanceFloor × the best score and caps
+// the result at n, preserving the reranked order. Empty/zero-score inputs pass through.
+func pruneByRelevance(in []core.ScoredEmbedding, ratio float64, n int) []core.ScoredEmbedding {
+	if len(in) == 0 {
+		return in
+	}
+	best := in[0].Score
+	for _, r := range in {
+		if r.Score > best {
+			best = r.Score
+		}
+	}
+	floor := best * ratio
+	out := make([]core.ScoredEmbedding, 0, n)
+	for _, r := range in {
+		if r.Score >= floor {
+			out = append(out, r)
+			if len(out) >= n {
+				break
+			}
+		}
+	}
+	return out
+}
+
 // extractConcurrency bounds parallel LLM ontology-extraction calls during
 // ingest. The gateway permits ~10 concurrent requests; sequential extraction is
 // otherwise the dominant ingest cost.
@@ -131,16 +160,20 @@ func (s *Store) SearchGraph(ctx context.Context, query string, topK int) (*Graph
 	if topK <= 0 {
 		topK = 6
 	}
-	// Two-stage retrieval: hybrid (vector + text) recall, then a reranker over the
-	// over-fetched candidate set (cortexdb over-fetches internally when a Reranker
-	// is set), tightening precision before the top-k cut.
-	results, err := s.db.HybridSearchTextWithOptions(ctx, query, cortexdb.TextSearchOptions{
-		TopK:     topK,
+	// Two-stage retrieval: hybrid (vector + text) recall over a wide candidate pool,
+	// reranked, then pruned to the chunks within relevanceFloor of the top reranked
+	// score and capped at topK. The floor is *query-relative*: raw scores vary ~3x
+	// across queries (and decay smoothly), so an absolute MinScore either keeps
+	// everything or empties the result — a relative floor drops the off-topic tail
+	// without that risk, raising the precision of the agent's context.
+	candidates, err := s.db.HybridSearchTextWithOptions(ctx, query, cortexdb.TextSearchOptions{
+		TopK:     topK * 4, // over-fetch so the floor has a tail to trim
 		Reranker: searchReranker,
 	})
 	if err != nil {
 		return nil, err
 	}
+	results := pruneByRelevance(candidates, relevanceFloor, topK)
 	res := &GraphResult{}
 	// The graph stores nodes under cortexdb-normalized "entity:" ids, while the
 	// embedding/chunk id is the raw node id (e.g. "function:pkg/main.c:foo").
