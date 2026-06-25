@@ -156,6 +156,8 @@ github.com/liliang-cn/agent-go/v2 v2.92.0 h1:vnwjZ1o1cCNw+iz2DfwkgcpaJphQn56D0Mz
 github.com/liliang-cn/agent-go/v2 v2.92.0/go.mod h1:3GZrBOUmbLppIamZ0FbK+p84dtBYTPLHVg/mBBkj1lk=
 github.com/liliang-cn/cortexdb/v2 v2.35.0 h1:uxcoPuDx0gzMHUwr4IfTpqxfDbRlKMBfxgVLUZtQeNE=
 github.com/liliang-cn/cortexdb/v2 v2.35.0/go.mod h1:O4EPYRbBsEpEsRisT2Hs2jhKVoEMPuRm87xAXpwLMwc=
+github.com/liliang-cn/eval-go v0.1.1 h1:KamTK4/s+IDb4cNMJ9STL1g9r/dQPfye124EC0H6lhA=
+github.com/liliang-cn/eval-go v0.1.1/go.mod h1:XNOfT5nF0sXUfdEeJ3prrVBTeTfhYRBFKwnrJ9xfMrM=
 github.com/liliang-cn/mcp-swagger-server v0.4.0 h1:vgcUvQp+ped++O1+hQz29oWtXiHE+QrC3wjeQvyT50o=
 github.com/liliang-cn/mcp-swagger-server v0.4.0/go.mod h1:/ulyr2I9rj9LFAY4mdT875hewZGYgMi08uNKBa203Ew=
 github.com/liliang-cn/pipeit v0.1.0 h1:ZU5hkL5SXr6vHtn/gcJBX9i55l0HM4rVsYTfxqn5M34=
