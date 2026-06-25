@@ -103,7 +103,7 @@ export default function App() {
           {view === "chat" && <Chat />}
           {view === "logs" && <LogAnalysis />}
           {view === "search" && <Search />}
-          {view === "graph" && <GraphView />}
+          {view === "graph" && <GraphView theme={theme} />}
         </div>
       </main>
     </div>

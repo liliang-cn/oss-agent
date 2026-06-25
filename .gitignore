@@ -15,5 +15,10 @@ skills/
 # misc
 .DS_Store
 
+# local test/screenshot artifacts
+.playwright-mcp/
+/*.jpeg
+/*.png
+
 # cross-compile output (make build-linux)
 /dist/
