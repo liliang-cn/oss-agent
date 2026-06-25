@@ -4,8 +4,9 @@ go 1.25.5
 
 require (
 	github.com/BurntSushi/toml v1.6.0
-	github.com/liliang-cn/agent-go/v2 v2.91.0
-	github.com/liliang-cn/cortexdb/v2 v2.26.0
+	github.com/liliang-cn/agent-go/v2 v2.92.0
+	github.com/liliang-cn/cortexdb/v2 v2.35.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -70,6 +71,7 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/json-iterator/go v0.0.0-20171115153421-f7279a603ede // indirect
+	github.com/liliang-cn/eval-go v0.0.0
 	github.com/liliang-cn/mcp-swagger-server v0.4.0 // indirect
 	github.com/liliang-cn/pipeit v0.1.0 // indirect
 	github.com/liliang-cn/skills-go v1.7.0 // indirect
@@ -103,9 +105,10 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260226221140-a57be14db171 // indirect
 	google.golang.org/grpc v1.81.1 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 	modernc.org/libc v1.66.3 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 	modernc.org/sqlite v1.38.2 // indirect
 )
+
+replace github.com/liliang-cn/eval-go => /Users/liliang/Things/AI/base/eval-go

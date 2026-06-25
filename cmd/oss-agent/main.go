@@ -81,6 +81,8 @@ func main() {
 		runDomain()
 	case "check":
 		runCheck(strings.Join(os.Args[2:], " "))
+	case "eval":
+		runEval(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Println(version)
 	default:

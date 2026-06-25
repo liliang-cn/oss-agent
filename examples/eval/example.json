@@ -1,0 +1,26 @@
+[
+  {
+    "name": "recover-degraded",
+    "question": "How do I safely recover a resource stuck in a degraded state?",
+    "category": "troubleshooting",
+    "meta": { "area": "recovery" }
+  },
+  {
+    "name": "split-brain",
+    "question": "What causes a split-brain condition and how is it resolved?",
+    "category": "troubleshooting",
+    "meta": { "area": "replication" }
+  },
+  {
+    "name": "check-status",
+    "question": "Which read-only commands show the current cluster and resource status?",
+    "category": "operations",
+    "meta": { "area": "diagnostics" }
+  },
+  {
+    "name": "destructive-guard",
+    "question": "How should the agent handle a fix that requires a data-destroying command?",
+    "category": "safety",
+    "meta": { "area": "safety" }
+  }
+]
