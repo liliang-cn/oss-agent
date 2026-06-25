@@ -21,6 +21,7 @@ import (
 
 	"github.com/liliang-cn/agent-go/v2/pkg/agent"
 
+	"github.com/liliang-cn/oss-agent/internal/cite"
 	"github.com/liliang-cn/oss-agent/internal/domain"
 	"github.com/liliang-cn/oss-agent/internal/knowledge"
 	"github.com/liliang-cn/oss-agent/internal/loganalyze"
@@ -337,49 +338,121 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	message, recalled := s.augmentWithRecall(r.Context(), userMsg)
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	// NDJSON event stream: one JSON object per line. Frame types:
+	//   {"t":"tool","name":..,"args":{..}}   agent invoked a tool
+	//   {"t":"tool_result","name":..}         that tool returned
+	//   {"t":"text","d":".."}                 answer delta
+	//   {"t":"error","d":".."} / {"t":"done"}
+	w.Header().Set("Content-Type", "application/x-ndjson; charset=utf-8")
 	w.Header().Set("X-Session-Id", sid)
 	w.Header().Set("X-Recalled", fmt.Sprintf("%d", recalled))
 	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 
-	// Real streaming via RunStream: forward token deltas when the model speaks the
-	// answer; when it returns the answer via task_complete (no token events), the
-	// fixed agent-go runtime delivers it as the final EventTypeComplete, which we
-	// flush in chunks so the client still sees a progressive reveal.
+	enc := json.NewEncoder(w) // Encode writes a trailing newline → NDJSON
+	frame := func(v any) { _ = enc.Encode(v); flusher.Flush() }
+
+	// Real streaming via RunStream: forward tool calls/results live, then token
+	// deltas when the model speaks the answer; when it returns the answer via
+	// task_complete (no token events), the final EventTypeComplete is flushed in
+	// chunks so the client still sees a progressive reveal.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	events, err := s.svc.RunStream(r.Context(), message)
 	if err != nil {
-		io.WriteString(w, "[error] "+err.Error())
-		flusher.Flush()
+		frame(map[string]any{"t": "error", "d": err.Error()})
+		frame(map[string]any{"t": "done"})
 		return
 	}
 	var streamed bool
 	var full, final string
+	var sources []string
+	seenSrc := map[string]bool{}
 	for ev := range events {
 		switch ev.Type {
 		case agent.EventTypePartial:
 			if ev.Content != "" {
 				streamed = true
 				full += ev.Content
-				io.WriteString(w, ev.Content)
-				flusher.Flush()
+				frame(map[string]any{"t": "text", "d": ev.Content})
 			}
+		case agent.EventTypeToolCall:
+			// task_complete is the internal answer-delivery sentinel (its args carry
+			// the whole answer); don't surface it as a tool.
+			if ev.ToolName == "task_complete" {
+				continue
+			}
+			frame(map[string]any{"t": "tool", "name": ev.ToolName, "args": ev.ToolArgs})
+		case agent.EventTypeToolResult:
+			if ev.ToolName == "task_complete" {
+				continue
+			}
+			if ev.ToolName == "knowledge_search" {
+				collectSources(ev.ToolResult, seenSrc, &sources)
+			}
+			frame(map[string]any{"t": "tool_result", "name": ev.ToolName})
 		case agent.EventTypeComplete:
 			final = ev.Content
+		case agent.EventTypeError:
+			// Swallow internal, non-fatal infra hiccups (e.g. history compaction)
+			// so they don't pollute the answer.
+			if strings.Contains(ev.Content, "compaction") {
+				continue
+			}
+			frame(map[string]any{"t": "error", "d": ev.Content})
 		}
 	}
 	if !streamed && final != "" {
 		full = final
 		for _, ch := range chunkText(final, 18) {
-			io.WriteString(w, ch)
-			flusher.Flush()
+			frame(map[string]any{"t": "text", "d": ch})
 		}
 	}
+	// Deterministic citation footer: the model is unreliable at inline citing, so
+	// always list the sources knowledge_search actually retrieved this turn (unless
+	// the model already produced a Sources section).
+	if foot := cite.Footer(full, sources); foot != "" {
+		for _, ch := range chunkText(foot, 24) {
+			frame(map[string]any{"t": "text", "d": ch})
+		}
+		full += foot
+	}
+	frame(map[string]any{"t": "done"})
 	if s.convMemory && full != "" {
 		_ = s.store.SaveTurn(context.Background(), sid, "user", userMsg)
 		_ = s.store.SaveTurn(context.Background(), sid, "assistant", full)
+	}
+}
+
+// collectSources pulls the "source" of every hit out of a knowledge_search tool
+// result into a deduped, order-preserving list. It round-trips through JSON so it
+// works regardless of the concrete Go shape the event carries (map, typed slice,
+// or a JSON string).
+func collectSources(res any, seen map[string]bool, out *[]string) {
+	var b []byte
+	if s, ok := res.(string); ok {
+		b = []byte(s)
+	} else {
+		var err error
+		if b, err = json.Marshal(res); err != nil {
+			return
+		}
+	}
+	var parsed struct {
+		Hits []struct {
+			Source string `json:"source"`
+		} `json:"hits"`
+	}
+	if json.Unmarshal(b, &parsed) != nil {
+		return
+	}
+	for _, h := range parsed.Hits {
+		if h.Source == "" || seen[h.Source] {
+			continue
+		}
+		seen[h.Source] = true
+		*out = append(*out, h.Source)
 	}
 }
 

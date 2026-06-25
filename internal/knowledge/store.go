@@ -15,9 +15,15 @@ import (
 	"sync"
 
 	"github.com/liliang-cn/cortexdb/v2/pkg/cortexdb"
+	"github.com/liliang-cn/cortexdb/v2/pkg/core"
 
 	"github.com/liliang-cn/oss-agent/internal/extract"
 )
+
+// searchReranker is the second-stage reranker applied to the over-fetched
+// candidate set: it boosts chunks whose text contains the query terms, pushing
+// lexically on-topic results above purely vector-similar ones.
+var searchReranker = core.NewKeywordMatchReranker(0.3)
 
 // extractConcurrency bounds parallel LLM ontology-extraction calls during
 // ingest. The gateway permits ~10 concurrent requests; sequential extraction is
@@ -125,7 +131,13 @@ func (s *Store) SearchGraph(ctx context.Context, query string, topK int) (*Graph
 	if topK <= 0 {
 		topK = 6
 	}
-	results, err := s.db.HybridSearchText(ctx, query, topK)
+	// Two-stage retrieval: hybrid (vector + text) recall, then a reranker over the
+	// over-fetched candidate set (cortexdb over-fetches internally when a Reranker
+	// is set), tightening precision before the top-k cut.
+	results, err := s.db.HybridSearchTextWithOptions(ctx, query, cortexdb.TextSearchOptions{
+		TopK:     topK,
+		Reranker: searchReranker,
+	})
 	if err != nil {
 		return nil, err
 	}

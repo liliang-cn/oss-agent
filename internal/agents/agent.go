@@ -15,6 +15,7 @@ import (
 	agdomain "github.com/liliang-cn/agent-go/v2/pkg/domain"
 	"github.com/liliang-cn/agent-go/v2/pkg/providers"
 
+	"github.com/liliang-cn/oss-agent/internal/cite"
 	"github.com/liliang-cn/oss-agent/internal/config"
 	"github.com/liliang-cn/oss-agent/internal/domain"
 	"github.com/liliang-cn/oss-agent/internal/extract"
@@ -85,7 +86,7 @@ func Build(cfg config.Config, dom *domain.Domain) (*agent.Service, *knowledge.St
 	// iterative ReAct tool use but yields a single clean text answer in FinalResult —
 	// the right shape for an ask/diagnose agent.
 	svc, err := agent.New("oss-agent").
-		WithSystemPrompt(dom.Persona).
+		WithSystemPrompt(dom.Persona + citationDirective).
 		WithLLM(llm).
 		WithEmbedder(emb).
 		WithSkills(). // loads ~/.agentgo/skills (understand-* codebase-comprehension skills)
@@ -108,6 +109,21 @@ func Build(cfg config.Config, dom *domain.Domain) (*agent.Service, *knowledge.St
 	registerSafetyLint(svc, filter)
 	return svc, store, nil
 }
+
+// citationDirective is appended to every domain's persona so answers cite their
+// retrieved evidence regardless of what the domain.toml persona says. Each
+// knowledge_search hit carries a stable, readable "cite" label derived from its
+// source, so the same source keeps the same label across every search in a turn.
+const citationDirective = `
+
+Citations (required — do this every time you use knowledge_search):
+- Each hit has a "cite" label (e.g. drbd-troubleshooting.adoc) and a full "source".
+  When a statement in your answer comes from a hit, append its label in square
+  brackets right after the claim, e.g. "... triggers a full resync [drbd-troubleshooting].".
+- The same source always has the same label — reuse it, and combine like [a][b].
+- End the answer with a "Sources" section: one line per label you cited,
+  "- [label] full-source". List each source once; only labels that appeared in
+  knowledge_search results — never invent one.`
 
 // registerKnowledgeSearch exposes the GraphRAG knowledge base as a tool.
 func registerKnowledgeSearch(svc *agent.Service, store *knowledge.Store) {
@@ -132,10 +148,23 @@ func registerKnowledgeSearch(svc *agent.Service, store *knowledge.Store) {
 			if err != nil {
 				return map[string]interface{}{"ok": false, "error": err.Error()}, nil
 			}
+			// Tag each hit [S1], [S2]… so the model can cite it inline. The tag's
+			// source is the chunk's document id (file path / doc identifier).
+			hits := make([]map[string]interface{}, 0, len(gr.Hits))
+			for _, h := range gr.Hits {
+				hits = append(hits, map[string]interface{}{
+					"cite":     cite.Label(h.DocumentID),
+					"source":   h.DocumentID,
+					"content":  h.Content,
+					"score":    h.Score,
+					"entities": h.Entities,
+				})
+			}
 			return map[string]interface{}{
 				"ok":                true,
-				"hits":              gr.Hits,
+				"hits":              hits,
 				"related_via_graph": gr.Neighbors,
+				"citation_hint":     "Cite each grounded statement inline with the hit's [cite] label; list the labels you used under a final Sources section.",
 			}, nil
 		})
 }
