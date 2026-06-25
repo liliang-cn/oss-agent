@@ -107,6 +107,9 @@ export function Chat() {
           try { f = JSON.parse(line); } catch { continue; }
           if (f.t === "text") {
             patchLast((a) => ({ ...a, content: a.content + (f.d || "") }));
+          } else if (f.t === "reset") {
+            // Server replaced a streamed preamble with the authoritative answer.
+            patchLast((a) => ({ ...a, content: "" }));
           } else if (f.t === "tool") {
             // Collapse identical repeated calls (same tool + args) into one row with a count.
             patchLast((a) => {

@@ -403,7 +403,15 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 			frame(map[string]any{"t": "error", "d": ev.Content})
 		}
 	}
-	if !streamed && final != "" {
+	// The authoritative answer is the EventTypeComplete payload. When the model
+	// streamed only a preamble ("Let me check…") as partials and then delivered the
+	// real answer via task_complete, `final` holds it and the streamed text doesn't
+	// contain it — clear the preamble and emit the real answer. When the answer was
+	// itself streamed, `full` already contains `final`, so we leave it alone.
+	if final != "" && !strings.Contains(full, strings.TrimSpace(final)) {
+		if streamed {
+			frame(map[string]any{"t": "reset"}) // drop the preamble shown so far
+		}
 		full = final
 		for _, ch := range chunkText(final, 18) {
 			frame(map[string]any{"t": "text", "d": ch})
