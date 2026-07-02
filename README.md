@@ -108,3 +108,40 @@ The embedder used to query must match the one used to build the store (e.g. olla
 2. Point `OSS_DOMAIN_FILE` at it.
 3. Ingest the project's repos (`ingest-repo`) and docs (`ingest-repo` text path).
 4. `ask` / `analyze-log` away. No engine code changes.
+
+## Use as a library
+
+The CLI and HTTP server are one app built on the public package
+`github.com/liliang-cn/oss-agent` — embed the same engine in your own program:
+
+```go
+import ossagent "github.com/liliang-cn/oss-agent"
+
+// Zero-value fields fall back to OSS_* env vars, then defaults.
+a, err := ossagent.New(ossagent.Config{DomainFile: "domain.toml"})
+if err != nil { log.Fatal(err) }
+defer a.Close()
+
+answer, _ := a.Ask(ctx, "How do I recover a StandAlone resource?")
+
+// Stream tool calls + the grounded, cited answer:
+a.Stream(ctx, question, func(e ossagent.Event) {
+    switch e.Kind {
+    case ossagent.EventToolCall: log.Printf("tool %s %v", e.Tool, e.Args)
+    case ossagent.EventText:     fmt.Print(e.Text)
+    }
+})
+```
+
+| method | what it does |
+|---|---|
+| `New(Config)` / `Close()` | build / release the agent (LLM + knowledge store) |
+| `Ask` / `Diagnose` | one-shot grounded answer (ReAct: probes + knowledge_search + red-line wall) |
+| `Chat(sessionID, msg)` | multi-turn with persisted per-session history |
+| `Stream(q, on)` | live tool calls + answer deltas; returns the full answer + cited sources |
+| `Search(q, k)` | top reranked knowledge chunks (no LLM) |
+| `CheckCommand(cmd)` | run a command through the deterministic red-line wall |
+| `AnalyzeLog(path)` | triage a log file / dir / archive into ranked problems |
+
+Config is env-first, so a process configured via `OSS_*` can call
+`ossagent.New(ossagent.Config{})`. A runnable example lives in `examples/lib/`.

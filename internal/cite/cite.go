@@ -4,7 +4,41 @@
 // (which measures citation coverage).
 package cite
 
-import "strings"
+import (
+	"encoding/json"
+	"strings"
+)
+
+// CollectSources pulls the "source" of every hit out of a knowledge_search tool
+// result into a deduped, order-preserving list. It round-trips through JSON so it
+// works regardless of the concrete Go shape the event carries (map, typed slice,
+// or a JSON string).
+func CollectSources(res any, seen map[string]bool, out *[]string) {
+	var b []byte
+	if s, ok := res.(string); ok {
+		b = []byte(s)
+	} else {
+		var err error
+		if b, err = json.Marshal(res); err != nil {
+			return
+		}
+	}
+	var parsed struct {
+		Hits []struct {
+			Source string `json:"source"`
+		} `json:"hits"`
+	}
+	if json.Unmarshal(b, &parsed) != nil {
+		return
+	}
+	for _, h := range parsed.Hits {
+		if h.Source == "" || seen[h.Source] {
+			continue
+		}
+		seen[h.Source] = true
+		*out = append(*out, h.Source)
+	}
+}
 
 // Label turns a source / document id into a short, stable, bracket-safe citation
 // label (letters, digits, hyphen, underscore only) so it reads cleanly inline as

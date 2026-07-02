@@ -389,7 +389,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			if ev.ToolName == "knowledge_search" {
-				collectSources(ev.ToolResult, seenSrc, &sources)
+				cite.CollectSources(ev.ToolResult, seenSrc, &sources)
 			}
 			frame(map[string]any{"t": "tool_result", "name": ev.ToolName})
 		case agent.EventTypeComplete:
@@ -430,37 +430,6 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	if s.convMemory && full != "" {
 		_ = s.store.SaveTurn(context.Background(), sid, "user", userMsg)
 		_ = s.store.SaveTurn(context.Background(), sid, "assistant", full)
-	}
-}
-
-// collectSources pulls the "source" of every hit out of a knowledge_search tool
-// result into a deduped, order-preserving list. It round-trips through JSON so it
-// works regardless of the concrete Go shape the event carries (map, typed slice,
-// or a JSON string).
-func collectSources(res any, seen map[string]bool, out *[]string) {
-	var b []byte
-	if s, ok := res.(string); ok {
-		b = []byte(s)
-	} else {
-		var err error
-		if b, err = json.Marshal(res); err != nil {
-			return
-		}
-	}
-	var parsed struct {
-		Hits []struct {
-			Source string `json:"source"`
-		} `json:"hits"`
-	}
-	if json.Unmarshal(b, &parsed) != nil {
-		return
-	}
-	for _, h := range parsed.Hits {
-		if h.Source == "" || seen[h.Source] {
-			continue
-		}
-		seen[h.Source] = true
-		*out = append(*out, h.Source)
 	}
 }
 
