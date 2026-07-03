@@ -215,7 +215,7 @@ func (a *Agent) Diagnose(ctx context.Context, symptom string) (string, error) {
 // maxToolRounds caps the ReAct tool-call budget per turn so a model that fails to
 // converge (redundantly re-calling the same tool) is forced to answer with what it
 // has instead of looping unboundedly and burning API cost.
-const maxToolRounds = 16
+const maxToolRounds = 8
 
 // Chat runs a turn within a persistent session: history keyed by sessionID is
 // loaded and saved by the agent, so follow-ups remember earlier turns.
