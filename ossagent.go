@@ -212,10 +212,15 @@ func (a *Agent) Diagnose(ctx context.Context, symptom string) (string, error) {
 	return a.svc.Ask(ctx, "Troubleshoot this symptom and give the safest recovery steps:\n"+symptom)
 }
 
+// maxToolRounds caps the ReAct tool-call budget per turn so a model that fails to
+// converge (redundantly re-calling the same tool) is forced to answer with what it
+// has instead of looping unboundedly and burning API cost.
+const maxToolRounds = 16
+
 // Chat runs a turn within a persistent session: history keyed by sessionID is
 // loaded and saved by the agent, so follow-ups remember earlier turns.
 func (a *Agent) Chat(ctx context.Context, sessionID, message string) (string, error) {
-	res, err := a.svc.Run(ctx, message, agent.WithSessionID(sessionID))
+	res, err := a.svc.Run(ctx, message, agent.WithSessionID(sessionID), agent.WithMaxTurns(maxToolRounds))
 	if err != nil {
 		return "", err
 	}
@@ -288,7 +293,7 @@ type Event struct {
 // its completion tool; when that happens Stream emits an EventReset before the
 // authoritative answer so a UI can clear the preamble.
 func (a *Agent) Stream(ctx context.Context, question string, on func(Event)) (answer string, sources []string, err error) {
-	events, err := a.svc.RunStream(ctx, question)
+	events, err := a.svc.RunStreamWithOptions(ctx, question, agent.WithMaxTurns(maxToolRounds))
 	if err != nil {
 		return "", nil, err
 	}
