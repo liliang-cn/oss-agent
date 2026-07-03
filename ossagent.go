@@ -21,10 +21,12 @@ package ossagent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
 	"github.com/liliang-cn/agent-go/v2/pkg/agent"
+	"github.com/liliang-cn/agent-go/v2/pkg/mcp"
 
 	"github.com/liliang-cn/oss-agent/internal/agents"
 	"github.com/liliang-cn/oss-agent/internal/cite"
@@ -67,15 +69,39 @@ type Config struct {
 	// to a domain.toml (OSS_DOMAIN_FILE if both are empty). Domain wins if set.
 	DomainFile string
 	Domain     *Domain
+
+	// MCPServers are external MCP servers whose tools are mounted into the ReAct
+	// loop. This is a code-only knob (no OSS_* fallback). A server that fails to
+	// connect is skipped (the agent degrades to knowledge-only); inspect the
+	// outcome with Agent.MCPStatus. Mark a spec ReadOnly to mount only its
+	// observational tools — the safe default for cluster-control servers.
+	MCPServers []MCPServerSpec
 }
+
+// MCPServerSpec configures one external MCP server to mount into the agent.
+type MCPServerSpec struct {
+	Name              string            // logical name, e.g. "sds"
+	Transport         string            // "stdio" | "http" | "sse" (default "stdio")
+	Command           string            // stdio: executable
+	Args              []string          // stdio args
+	URL               string            // http/sse base URL
+	Headers           map[string]string // http/sse optional headers
+	ReadOnly          bool              // when true, mount only read-only tools
+	ReadOnlyToolAllow []string          // explicit allowlist (optional; overrides the name heuristic)
+}
+
+// MCPStatus reports the outcome of mounting one MCP server in New.
+type MCPStatus = agents.MCPMountStatus
 
 // Agent is a configured ops/support agent. It is safe for sequential use; run one
 // Ask/Chat/Stream at a time (the underlying ReAct loop is single-flight). Always Close it.
 type Agent struct {
-	svc    *agent.Service
-	store  *knowledge.Store
-	dom    *domain.Domain
-	filter *safety.Filter
+	svc     *agent.Service
+	store   *knowledge.Store
+	dom     *domain.Domain
+	filter  *safety.Filter
+	mcp     []*mcp.Client
+	mcpStat []MCPStatus
 }
 
 // LoadDomain reads a domain.toml from disk.
@@ -133,12 +159,42 @@ func New(cfg Config) (*Agent, error) {
 		store.Close()
 		return nil, fmt.Errorf("compile red-lines: %w", err)
 	}
-	return &Agent{svc: svc, store: store, dom: dom, filter: filter}, nil
+
+	a := &Agent{svc: svc, store: store, dom: dom, filter: filter}
+
+	// Mount any external MCP servers. This never fails New: unreachable servers are
+	// recorded in mcpStat and skipped, leaving a knowledge-only agent.
+	if len(cfg.MCPServers) > 0 {
+		specs := make([]agents.MCPSpec, len(cfg.MCPServers))
+		for i, s := range cfg.MCPServers {
+			specs[i] = agents.MCPSpec{
+				Name:              s.Name,
+				Transport:         s.Transport,
+				Command:           s.Command,
+				Args:              s.Args,
+				URL:               s.URL,
+				Headers:           s.Headers,
+				ReadOnly:          s.ReadOnly,
+				ReadOnlyToolAllow: s.ReadOnlyToolAllow,
+			}
+		}
+		a.mcp, a.mcpStat = agents.MountMCP(context.Background(), svc, specs)
+	}
+
+	return a, nil
 }
 
-// Close releases the agent's LLM service and knowledge store.
+// MCPStatus returns the per-server outcome of mounting the configured MCP servers
+// (whether each connected, how many tools were registered, and any error). It is
+// empty when no MCPServers were configured.
+func (a *Agent) MCPStatus() []MCPStatus { return a.mcpStat }
+
+// Close releases the agent's LLM service, knowledge store, and MCP clients.
 func (a *Agent) Close() error {
 	a.svc.Close()
+	for _, c := range a.mcp {
+		_ = c.Close()
+	}
 	return a.store.Close()
 }
 
@@ -198,14 +254,30 @@ const (
 	EventToolResult EventKind = "tool_result" // Tool: that tool returned
 	EventReset      EventKind = "reset"       // discard answer text emitted so far (a preamble)
 	EventError      EventKind = "error"       // Text is a non-fatal error message
+	EventSuggestion EventKind = "suggestion"  // Suggestion: a structured, non-executed action proposal
 )
 
-// Event is one item in a streamed run.
+// Suggestion is a structured, NON-executed action the agent proposes for an
+// operator to approve. It is emitted via EventSuggestion when the agent calls the
+// built-in suggest_action tool; nothing is run. Verdict is the deterministic
+// red-line wall's ruling on the proposed action (Verdict.Blocked ⇒ the action is
+// destructive and needs explicit, guarded confirmation).
+type Suggestion struct {
+	Action   string         `json:"action"`
+	Params   map[string]any `json:"params"`
+	Reason   string         `json:"reason"`
+	Severity string         `json:"severity"` // "low" | "medium" | "high"
+	Verdict  Verdict        `json:"verdict"`
+}
+
+// Event is one item in a streamed run. For EventSuggestion, Suggestion is set (and
+// Tool is "suggest_action"); for tool events Tool/Args are set; otherwise Text.
 type Event struct {
-	Kind EventKind
-	Text string
-	Tool string
-	Args map[string]any
+	Kind       EventKind
+	Text       string
+	Tool       string
+	Args       map[string]any
+	Suggestion *Suggestion // set only for EventSuggestion
 }
 
 // Stream runs a question and delivers Events to on as they happen (tool calls,
@@ -235,9 +307,18 @@ func (a *Agent) Stream(ctx context.Context, question string, on func(Event)) (an
 			if ev.ToolName == "task_complete" { // internal answer sentinel
 				continue
 			}
+			if ev.ToolName == agents.SuggestActionToolName {
+				continue // the proposal is surfaced on the tool result as EventSuggestion
+			}
 			on(Event{Kind: EventToolCall, Tool: ev.ToolName, Args: ev.ToolArgs})
 		case agent.EventTypeToolResult:
 			if ev.ToolName == "task_complete" {
+				continue
+			}
+			if ev.ToolName == agents.SuggestActionToolName {
+				if s := parseSuggestion(ev.ToolResult); s != nil {
+					on(Event{Kind: EventSuggestion, Tool: ev.ToolName, Suggestion: s})
+				}
 				continue
 			}
 			if ev.ToolName == "knowledge_search" {
@@ -266,4 +347,26 @@ func (a *Agent) Stream(ctx context.Context, question string, on func(Event)) (an
 		on(Event{Kind: EventText, Text: foot})
 	}
 	return full, sources, nil
+}
+
+// parseSuggestion reconstructs the structured proposal from the suggest_action
+// tool result. It round-trips through JSON so it is robust to whatever concrete
+// Go shape the event carries (map, typed value, or a JSON string).
+func parseSuggestion(res any) *Suggestion {
+	var b []byte
+	if s, ok := res.(string); ok {
+		b = []byte(s)
+	} else {
+		var err error
+		if b, err = json.Marshal(res); err != nil {
+			return nil
+		}
+	}
+	var parsed struct {
+		Suggestion *Suggestion `json:"suggestion"`
+	}
+	if json.Unmarshal(b, &parsed) != nil || parsed.Suggestion == nil {
+		return nil
+	}
+	return parsed.Suggestion
 }

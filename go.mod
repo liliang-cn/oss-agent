@@ -77,7 +77,7 @@ require (
 	github.com/liliang-cn/skills-go v1.7.0 // indirect
 	github.com/mark3labs/mcp-go v0.32.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
-	github.com/modelcontextprotocol/go-sdk v1.6.1 // indirect
+	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/mschoch/smat v0.2.0 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect
 	github.com/openai/openai-go/v3 v3.39.0 // indirect
