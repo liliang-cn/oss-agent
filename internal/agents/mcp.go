@@ -78,7 +78,7 @@ func MountMCP(ctx context.Context, svc *agent.Service, specs []MCPSpec) ([]*mcp.
 				st.Skipped++
 				continue
 			}
-			registerMCPTool(svc, client, spec.Name, name, tool)
+			registerMCPTool(svc, client, spec.Name, name, tool, spec.ReadOnly)
 			st.Tools++
 		}
 		statuses = append(statuses, st)
@@ -113,28 +113,36 @@ func serverConfig(spec MCPSpec) *mcp.ServerConfig {
 // registerMCPTool exposes one MCP tool as an agent tool. The handler forwards the
 // call to the MCP server via CallTool; results and errors are returned as plain
 // JSON-safe maps so the existing Stream event path surfaces them unchanged.
-func registerMCPTool(svc *agent.Service, client *mcp.Client, server, name string, tool *sdkmcp.Tool) {
+func registerMCPTool(svc *agent.Service, client *mcp.Client, server, name string, tool *sdkmcp.Tool, readOnly bool) {
 	desc := tool.Description
 	if desc == "" {
 		desc = fmt.Sprintf("Tool %q exposed by MCP server %q.", name, server)
 	}
 	call := name // capture per-iteration
 	c := client
-	svc.AddTool(name, desc, toParams(tool.InputSchema),
-		func(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-			res, err := c.CallTool(ctx, call, args)
-			if err != nil {
-				return map[string]interface{}{"ok": false, "error": err.Error()}, nil
-			}
-			if res != nil && !res.Success {
-				return map[string]interface{}{"ok": false, "error": res.Error}, nil
-			}
-			var data interface{}
-			if res != nil {
-				data = res.Data
-			}
-			return map[string]interface{}{"ok": true, "data": data}, nil
-		})
+	handler := func(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+		res, err := c.CallTool(ctx, call, args)
+		if err != nil {
+			return map[string]interface{}{"ok": false, "error": err.Error()}, nil
+		}
+		if res != nil && !res.Success {
+			return map[string]interface{}{"ok": false, "error": res.Error}, nil
+		}
+		var data interface{}
+		if res != nil {
+			data = res.Data
+		}
+		return map[string]interface{}{"ok": true, "data": data}, nil
+	}
+	// Flag read-only tools explicitly. agent-go's name heuristic doesn't treat
+	// e.g. "*_status" as read-only, so without this a duplicate status poll would
+	// be re-executed instead of collapsed. A ReadOnly tool is also concurrency-safe.
+	if readOnly {
+		svc.AddToolWithMetadata(name, desc, toParams(tool.InputSchema), handler,
+			agent.ToolMetadata{ReadOnly: true, ConcurrencySafe: true})
+		return
+	}
+	svc.AddTool(name, desc, toParams(tool.InputSchema), handler)
 }
 
 // readOnlyAdmit decides whether a tool may be mounted under ReadOnly.
