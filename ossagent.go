@@ -23,6 +23,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+	"os"
 	"strings"
 
 	"github.com/liliang-cn/agent-go/v2/pkg/agent"
@@ -217,6 +219,37 @@ func (a *Agent) Diagnose(ctx context.Context, symptom string) (string, error) {
 // has instead of looping unboundedly and burning API cost.
 const maxToolRounds = 8
 
+// debugEnabled turns on verbose per-turn tracing (every tool call with args, every
+// tool result, suggestions, resets and the final answer). Enable with OSS_DEBUG=1
+// (or true/yes/on). Off by default so production logs stay quiet.
+func debugEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("OSS_DEBUG"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// truncate shortens s to n runes for log lines so a huge tool result / answer does
+// not flood the journal.
+func truncate(s string, n int) string {
+	s = strings.TrimSpace(s)
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + fmt.Sprintf("…(+%d chars)", len(r)-n)
+}
+
+// jsonCompact renders args as a single-line JSON string for logging.
+func jsonCompact(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Sprintf("%v", v)
+	}
+	return string(b)
+}
+
 // Chat runs a turn within a persistent session: history keyed by sessionID is
 // loaded and saved by the agent, so follow-ups remember earlier turns.
 func (a *Agent) Chat(ctx context.Context, sessionID, message string) (string, error) {
@@ -293,27 +326,49 @@ type Event struct {
 // its completion tool; when that happens Stream emits an EventReset before the
 // authoritative answer so a UI can clear the preamble.
 func (a *Agent) Stream(ctx context.Context, question string, on func(Event)) (answer string, sources []string, err error) {
+	dbg := debugEnabled()
+	if dbg {
+		log.Printf("[ossagent] ▶ turn start: question=%q (maxToolRounds=%d, mcp_servers=%d)", truncate(question, 300), maxToolRounds, len(a.mcp))
+	}
 	events, err := a.svc.RunStreamWithOptions(ctx, question, agent.WithMaxTurns(maxToolRounds))
 	if err != nil {
+		if dbg {
+			log.Printf("[ossagent] ✗ RunStream error: %v", err)
+		}
 		return "", nil, err
 	}
 	seen := map[string]bool{}
 	var streamed bool
 	var full, final string
+	var toolCalls, toolResults, partials, suggestions int
 	for ev := range events {
 		switch ev.Type {
 		case agent.EventTypePartial:
 			if ev.Content != "" {
 				streamed = true
+				partials++
 				full += ev.Content
+				if dbg {
+					log.Printf("[ossagent]   · text delta (%d chars): %q", len([]rune(ev.Content)), truncate(ev.Content, 120))
+				}
 				on(Event{Kind: EventText, Text: ev.Content})
 			}
 		case agent.EventTypeToolCall:
 			if ev.ToolName == "task_complete" { // internal answer sentinel
+				if dbg {
+					log.Printf("[ossagent]   ✓ task_complete (model signalled done)")
+				}
 				continue
 			}
 			if ev.ToolName == agents.SuggestActionToolName {
+				if dbg {
+					log.Printf("[ossagent]   ⚑ suggest_action call args=%s", jsonCompact(ev.ToolArgs))
+				}
 				continue // the proposal is surfaced on the tool result as EventSuggestion
+			}
+			toolCalls++
+			if dbg {
+				log.Printf("[ossagent]   → tool call #%d: %s args=%s", toolCalls, ev.ToolName, jsonCompact(ev.ToolArgs))
 			}
 			on(Event{Kind: EventToolCall, Tool: ev.ToolName, Args: ev.ToolArgs})
 		case agent.EventTypeToolResult:
@@ -322,6 +377,11 @@ func (a *Agent) Stream(ctx context.Context, question string, on func(Event)) (an
 			}
 			if ev.ToolName == agents.SuggestActionToolName {
 				if s := parseSuggestion(ev.ToolResult); s != nil {
+					suggestions++
+					if dbg {
+						log.Printf("[ossagent]   ⚑ suggestion #%d: action=%s params=%s severity=%s blocked=%v reason=%q",
+							suggestions, s.Action, jsonCompact(s.Params), s.Severity, s.Verdict.Blocked, truncate(s.Reason, 160))
+					}
 					on(Event{Kind: EventSuggestion, Tool: ev.ToolName, Suggestion: s})
 				}
 				continue
@@ -329,12 +389,22 @@ func (a *Agent) Stream(ctx context.Context, question string, on func(Event)) (an
 			if ev.ToolName == "knowledge_search" {
 				cite.CollectSources(ev.ToolResult, seen, &sources)
 			}
+			toolResults++
+			if dbg {
+				log.Printf("[ossagent]   ← tool result #%d: %s → %s", toolResults, ev.ToolName, truncate(fmt.Sprintf("%v", ev.ToolResult), 240))
+			}
 			on(Event{Kind: EventToolResult, Tool: ev.ToolName})
 		case agent.EventTypeComplete:
 			final = ev.Content
+			if dbg {
+				log.Printf("[ossagent]   ■ complete: answer (%d chars): %q", len([]rune(final)), truncate(final, 200))
+			}
 		case agent.EventTypeError:
 			if strings.Contains(ev.Content, "compaction") { // internal, non-fatal
 				continue
+			}
+			if dbg {
+				log.Printf("[ossagent]   ⚠ error event: %s", truncate(ev.Content, 200))
 			}
 			on(Event{Kind: EventError, Text: ev.Content})
 		}
@@ -350,6 +420,10 @@ func (a *Agent) Stream(ctx context.Context, question string, on func(Event)) (an
 	if foot := cite.Footer(full, sources); foot != "" {
 		full += foot
 		on(Event{Kind: EventText, Text: foot})
+	}
+	if dbg {
+		log.Printf("[ossagent] ◀ turn done: tool_calls=%d tool_results=%d suggestions=%d text_deltas=%d sources=%d answer_len=%d",
+			toolCalls, toolResults, suggestions, partials, len(sources), len([]rune(full)))
 	}
 	return full, sources, nil
 }
