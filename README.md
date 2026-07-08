@@ -142,6 +142,13 @@ a.Stream(ctx, question, func(e ossagent.Event) {
 | `Search(q, k)` | top reranked knowledge chunks (no LLM) |
 | `CheckCommand(cmd)` | run a command through the deterministic red-line wall |
 | `AnalyzeLog(path)` | triage a log file / dir / archive into ranked problems |
+| `IngestDoc` / `IngestDir` | add docs to the knowledge base (embedded with the configured embedder) |
+| `Refresh(dir)` / `PurgeSource` | re-ingest a source (catches updates + deletions) / remove one |
+| `MCPStatus()` | per-server outcome of mounting `Config.MCPServers` (read-only tools into ReAct) |
+
+Updates re-embed with the Agent's embedder, so it **must** match the target DB's
+model/dimension (e.g. the extracted `drbd-reactor.db` is `text-embedding-v4` / 1024-dim)
+— mismatched vectors corrupt retrieval.
 
 Config is env-first, so a process configured via `OSS_*` can call
 `ossagent.New(ossagent.Config{})`. A runnable example lives in `examples/lib/`.

@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/liliang-cn/agent-go/v2/pkg/agent"
@@ -34,6 +35,8 @@ import (
 	"github.com/liliang-cn/oss-agent/internal/cite"
 	"github.com/liliang-cn/oss-agent/internal/config"
 	"github.com/liliang-cn/oss-agent/internal/domain"
+	"github.com/liliang-cn/oss-agent/internal/extract"
+	"github.com/liliang-cn/oss-agent/internal/ingest"
 	"github.com/liliang-cn/oss-agent/internal/knowledge"
 	"github.com/liliang-cn/oss-agent/internal/loganalyze"
 	"github.com/liliang-cn/oss-agent/internal/safety"
@@ -102,6 +105,7 @@ type Agent struct {
 	store   *knowledge.Store
 	dom     *domain.Domain
 	filter  *safety.Filter
+	extract *extract.Extractor // ontology extractor for ingest (nil ⇒ vectors only)
 	mcp     []*mcp.Client
 	mcpStat []MCPStatus
 }
@@ -162,7 +166,7 @@ func New(cfg Config) (*Agent, error) {
 		return nil, fmt.Errorf("compile red-lines: %w", err)
 	}
 
-	a := &Agent{svc: svc, store: store, dom: dom, filter: filter}
+	a := &Agent{svc: svc, store: store, dom: dom, filter: filter, extract: agents.BuildExtractor(c, dom)}
 
 	// Mount any external MCP servers. This never fails New: unreachable servers are
 	// recorded in mcpStat and skipped, leaving a knowledge-only agent.
@@ -282,6 +286,46 @@ func (a *Agent) AnalyzeLog(path string) (*LogReport, error) {
 	defer cleanup()
 	return loganalyze.Analyze(root, a.dom.ErrorPatterns)
 }
+
+// ── knowledge-base updates ──
+//
+// New content is embedded with the Agent's configured embedder, so it MUST be the
+// same model/dimension the target knowledge DB was built with — mismatched vectors
+// corrupt retrieval. Graph/ontology extraction runs only when an LLM is configured.
+
+// IngestStats summarizes an ingest run (doc/code files, mined error strings, skips).
+type IngestStats = ingest.Stats
+
+// IngestDoc adds or replaces a single document under the stable key id. When an LLM
+// is configured it also extracts ontology entities/relations into the graph.
+func (a *Agent) IngestDoc(ctx context.Context, id, title, content string) error {
+	return a.store.IngestSemantic(ctx, id, title, content, a.extract)
+}
+
+// IngestDir walks a local directory into the knowledge base: docs (.md/.adoc/…) as
+// prose, source files mined for their error/log strings. Document ids are prefixed
+// with the directory's base name (the source name used by Refresh/PurgeSource).
+func (a *Agent) IngestDir(ctx context.Context, dir string) (IngestStats, error) {
+	return ingest.Repo(ctx, a.store, dir, sourceName(dir), a.dom, a.extract)
+}
+
+// Refresh purges everything previously ingested from dir (by its source name) and
+// re-ingests it, so both updates and deletions take effect.
+func (a *Agent) Refresh(ctx context.Context, dir string) (IngestStats, error) {
+	if _, _, err := a.store.PurgeSource(ctx, sourceName(dir)+"/", true); err != nil {
+		return IngestStats{}, err
+	}
+	return ingest.Repo(ctx, a.store, dir, sourceName(dir), a.dom, a.extract)
+}
+
+// PurgeSource removes a source's chunks (and derived graph nodes/edges). match is a
+// document id, or its prefix when prefix is true. Returns the counts removed.
+func (a *Agent) PurgeSource(ctx context.Context, match string, prefix bool) (chunks, nodes int, err error) {
+	return a.store.PurgeSource(ctx, match, prefix)
+}
+
+// sourceName is the document-id prefix ingest.Repo assigns to a directory.
+func sourceName(dir string) string { return filepath.Base(filepath.Clean(dir)) }
 
 // EventKind classifies a streaming Event.
 type EventKind string
