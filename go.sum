@@ -154,10 +154,10 @@ github.com/ledongthuc/pdf v0.0.0-20220302134840-0c2507a12d80 h1:6Yzfa6GP0rIo/kUL
 github.com/ledongthuc/pdf v0.0.0-20220302134840-0c2507a12d80/go.mod h1:imJHygn/1yfhB7XSJJKlFZKl/J+dCPAknuiaGOshXAs=
 github.com/liliang-cn/agent-go/v2 v2.107.0 h1:8OJhoDvhV5F8WUVUYA0Jy6DDSjdv9M5Pyof+793CHhM=
 github.com/liliang-cn/agent-go/v2 v2.107.0/go.mod h1:vznqnwRi7oq3PetMb2IX3FNVTOHjWw8c1l3n3mXlqGg=
-github.com/liliang-cn/cortexdb/v2 v2.45.0 h1:XY8d/3FYQoAtbBdi3OtYRaKR2QB2sk8+1W9JpchnyJw=
-github.com/liliang-cn/cortexdb/v2 v2.45.0/go.mod h1:O4EPYRbBsEpEsRisT2Hs2jhKVoEMPuRm87xAXpwLMwc=
-github.com/liliang-cn/eval-go v0.1.1 h1:KamTK4/s+IDb4cNMJ9STL1g9r/dQPfye124EC0H6lhA=
-github.com/liliang-cn/eval-go v0.1.1/go.mod h1:XNOfT5nF0sXUfdEeJ3prrVBTeTfhYRBFKwnrJ9xfMrM=
+github.com/liliang-cn/cortexdb/v2 v2.62.1 h1:lsXueny86uFyPDOgUyP97RslSPldKqYDdZoHSil+ec4=
+github.com/liliang-cn/cortexdb/v2 v2.62.1/go.mod h1:O4EPYRbBsEpEsRisT2Hs2jhKVoEMPuRm87xAXpwLMwc=
+github.com/liliang-cn/eval-go v0.4.0 h1:qMkhS0XrvWn4nCI+KlJWnEPPSkUX4CemCudV9cX7x7c=
+github.com/liliang-cn/eval-go v0.4.0/go.mod h1:eiQ0WM6yrDCvXAzc1FUV5uGey+3MHD5qamj4soF29YQ=
 github.com/liliang-cn/mcp-swagger-server v0.4.0 h1:vgcUvQp+ped++O1+hQz29oWtXiHE+QrC3wjeQvyT50o=
 github.com/liliang-cn/mcp-swagger-server v0.4.0/go.mod h1:/ulyr2I9rj9LFAY4mdT875hewZGYgMi08uNKBa203Ew=
 github.com/liliang-cn/pipeit v0.1.0 h1:ZU5hkL5SXr6vHtn/gcJBX9i55l0HM4rVsYTfxqn5M34=

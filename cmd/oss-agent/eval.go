@@ -16,6 +16,7 @@ import (
 	"github.com/liliang-cn/oss-agent/internal/agents"
 	"github.com/liliang-cn/oss-agent/internal/cite"
 	"github.com/liliang-cn/oss-agent/internal/config"
+	"github.com/liliang-cn/oss-agent/internal/knowledge"
 )
 
 // evalCase is one row of an eval dataset: a question to ask the agent. Expected
@@ -79,7 +80,13 @@ func runEval(args []string) {
 		fmt.Fprintf(os.Stderr, "[%d/%d] %s\n", i+1, len(cases), c.Name)
 
 		// Retrieve the same context the agent grounds on, for the RAG judges.
-		gr, _ := store.SearchGraph(ctx, c.Question, *topK)
+		// Retrieval failures are non-fatal: the sample is still judged, just
+		// without retrieved context (the RAG metrics then score it as ungrounded).
+		gr, rerr := store.SearchGraph(ctx, c.Question, *topK)
+		if rerr != nil {
+			fmt.Fprintf(os.Stderr, "  retrieval failed: %v\n", rerr)
+			gr = &knowledge.GraphResult{}
+		}
 		contexts := make([]string, 0, len(gr.Hits))
 		sources := make([]string, 0, len(gr.Hits))
 		seen := map[string]bool{}

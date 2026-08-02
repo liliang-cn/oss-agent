@@ -5,7 +5,7 @@ go 1.25.5
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/liliang-cn/agent-go/v2 v2.107.0
-	github.com/liliang-cn/cortexdb/v2 v2.45.0
+	github.com/liliang-cn/cortexdb/v2 v2.62.1
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -82,7 +82,7 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/json-iterator/go v0.0.0-20171115153421-f7279a603ede // indirect
-	github.com/liliang-cn/eval-go v0.1.1
+	github.com/liliang-cn/eval-go v0.4.0
 	github.com/liliang-cn/mcp-swagger-server v0.4.0 // indirect
 	github.com/liliang-cn/pipeit v0.1.0 // indirect
 	github.com/liliang-cn/skills-go v1.7.0 // indirect
