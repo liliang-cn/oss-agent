@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -148,11 +149,27 @@ func registerMCPTool(svc *agent.Service, client *mcp.Client, server, name string
 // readOnlyAdmit decides whether a tool may be mounted under ReadOnly.
 //
 //   - If an explicit allowlist is provided, ONLY names in it are admitted.
-//   - Otherwise a name-heuristic ADMITS read-only-looking tools and REJECTS
-//     anything mutating; a name matching neither is rejected (fail closed).
+//   - Otherwise the name decides: the trailing segment is read as the operation,
+//     and only if that is inconclusive is the whole name scanned, reject-first.
+//     A name matching nothing is rejected (fail closed).
 //
-// Rejection wins over admission so a name carrying both (e.g. "list_and_delete")
-// is refused.
+// MCP defines a readOnlyHint annotation for exactly this question, and servers
+// do set it — but agent-go's tool wrapper exposes only Name, Description and
+// Schema, so the annotation never reaches this package. The name is all there
+// is. Prefer the allowlist when a server's naming cannot carry the meaning.
+//
+// Reading the TRAILING segment first is what makes the heuristic usable. These
+// names are "<subject>_<operation>", so scanning the whole string let a subject
+// veto its own operation: "sds_ha_promoter_status" was rejected because the
+// subject is a promoter, and "sds_snapshot_schedule_list" because the subject is
+// a schedule — both plainly read-only, both refused.
+//
+// Matching is per SEGMENT and exact, never substring. A substring scan admitted
+// "sds_widget_frobnicate", because "widget" contains "get" — and the same trap
+// waits in "address" for "add" and "gadget" for "get". For a gate that decides
+// what an LLM may call, a name nobody can classify must be refused, not guessed
+// at; the allowlist is the way through for a server whose naming carries no
+// operation at all.
 func readOnlyAdmit(name string, allow []string) bool {
 	if len(allow) > 0 {
 		for _, a := range allow {
@@ -162,23 +179,51 @@ func readOnlyAdmit(name string, allow []string) bool {
 		}
 		return false
 	}
-	n := strings.ToLower(name)
-	for _, t := range readOnlyRejectTokens {
-		if strings.Contains(n, t) {
+	segs := strings.FieldsFunc(strings.ToLower(name), func(r rune) bool {
+		return r == '_' || r == '.' || r == '-'
+	})
+	if len(segs) == 0 {
+		return false
+	}
+
+	// The operation is the last segment; it settles the question by itself.
+	switch op := segs[len(segs)-1]; {
+	case slices.Contains(readOnlyAdmitTokens, op):
+		return true
+	case slices.Contains(readOnlyRejectTokens, op):
+		return false
+	}
+
+	// It ended in a noun ("sds_pool_add_disk", "sds_gateway_create_nfs"), so the
+	// operation is somewhere earlier. Rejection wins over admission.
+	for _, seg := range segs {
+		if slices.Contains(readOnlyRejectTokens, seg) {
 			return false
 		}
 	}
-	for _, t := range readOnlyAdmitTokens {
-		if strings.Contains(n, t) {
+	for _, seg := range segs {
+		if slices.Contains(readOnlyAdmitTokens, seg) {
 			return true
 		}
 	}
 	return false
 }
 
+// trailingSegment returns the last "_"- or "."-delimited part of a tool name,
+// which is where these naming schemes put the operation. Empty when the name
+// has no separator to split on, in which case there is no operation to read
+// apart from the name itself and the caller falls back to scanning it whole.
+func trailingSegment(name string) string {
+	i := strings.LastIndexAny(name, "_.")
+	if i < 0 || i == len(name)-1 {
+		return ""
+	}
+	return name[i+1:]
+}
+
 // readOnlyAdmitTokens name a tool as observational.
 var readOnlyAdmitTokens = []string{
-	"list", "get", "status", "health", "describe", "show",
+	"list", "get", "status", "health", "describe", "show", "metadata",
 }
 
 // readOnlyRejectTokens name a tool as mutating; presence forces rejection.

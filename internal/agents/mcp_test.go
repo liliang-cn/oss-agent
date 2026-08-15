@@ -254,3 +254,71 @@ func newTestService(t *testing.T) *agent.Service {
 	}
 	return svc
 }
+
+// A read-only tool must not be refused because its SUBJECT contains a mutating
+// word. These three were all rejected before: sds-mcp marks them read-only and
+// the SDS Copilot still could not read promoter state, list snapshot schedules,
+// or fetch OCF agent metadata.
+func TestReadOnlyAdmitJudgesTheOperationNotTheSubject(t *testing.T) {
+	for _, name := range []string{
+		"sds_ha_promoter_status",     // subject "promoter", operation "status"
+		"sds_snapshot_schedule_list", // subject "schedule", operation "list"
+		"sds_ocf_agent_metadata",     // metadata describes, it does not change
+		"sds_resource_list",
+		"sds_node_health_check",
+	} {
+		if !readOnlyAdmit(name, nil) {
+			t.Errorf("readOnlyAdmit(%q) = false, want true", name)
+		}
+	}
+}
+
+// Reading the operation first must not let anything mutating through.
+func TestReadOnlyAdmitStillRefusesMutatingTools(t *testing.T) {
+	for _, name := range []string{
+		"sds_resource_create",
+		"sds_resource_delete",
+		"sds_ha_evict",
+		"sds_resource_set_role",
+		"sds_pool_add_disk",      // ends in a noun; the whole-name scan catches "add"
+		"sds_gateway_create_nfs", // ends in a noun; the scan catches "create"
+		"list_and_delete",        // ends in the mutating verb
+		"sds_backup_restore",
+	} {
+		if readOnlyAdmit(name, nil) {
+			t.Errorf("readOnlyAdmit(%q) = true, want false", name)
+		}
+	}
+}
+
+// A name with no operation to read and no known token stays refused.
+func TestReadOnlyAdmitFailsClosed(t *testing.T) {
+	for _, name := range []string{"frobnicate", "sds_widget_frobnicate", ""} {
+		if readOnlyAdmit(name, nil) {
+			t.Errorf("readOnlyAdmit(%q) = true, want false", name)
+		}
+	}
+}
+
+// An explicit allowlist overrides the heuristic in both directions.
+func TestReadOnlyAllowlistOverridesTheHeuristic(t *testing.T) {
+	if !readOnlyAdmit("sds_resource_create", []string{"sds_resource_create"}) {
+		t.Error("an allowlisted name must be admitted even though it looks mutating")
+	}
+	if readOnlyAdmit("sds_resource_list", []string{"sds_node_list"}) {
+		t.Error("with an allowlist, a name outside it must be refused")
+	}
+}
+
+func TestTrailingSegment(t *testing.T) {
+	for name, want := range map[string]string{
+		"sds_ha_promoter_status": "status",
+		"a.b.c":                  "c",
+		"nounderscore":           "",
+		"trailing_":              "",
+	} {
+		if got := trailingSegment(name); got != want {
+			t.Errorf("trailingSegment(%q) = %q, want %q", name, got, want)
+		}
+	}
+}
