@@ -207,7 +207,7 @@ func runIngestRepo(arg string) {
 
 	// 3a. preferred path: import the AST/LLM knowledge graph
 	if fileExists(graphPath) {
-		st, err := graphimport.Import(ctx, store, graphPath)
+		st, err := graphimport.Import(ctx, store, graphPath, repoName(dir), loadDomain(cfg).Vocabulary.Code)
 		if err != nil {
 			fail("import graph: %v", err)
 		}
@@ -222,7 +222,7 @@ func runIngestRepo(arg string) {
 		merged, ss, e := salvage.Salvage(dir)
 		if e == nil {
 			fmt.Printf("  salvaged %d nodes, %d edges, %d layers from %s\n", ss.Nodes, ss.Edges, ss.Layers, strings.Join(ss.Sources, ", "))
-			st, e2 := graphimport.Import(ctx, store, merged)
+			st, e2 := graphimport.Import(ctx, store, merged, repoName(dir), loadDomain(cfg).Vocabulary.Code)
 			if e2 != nil {
 				fail("import salvaged graph: %v", e2)
 			}
@@ -281,7 +281,7 @@ func runRefresh(arg string) {
 	graphPath := filepath.Join(dir, ".understand-anything", "knowledge-graph.json")
 	if fileExists(graphPath) {
 		// code source: purge by exact document_id, then re-import the graph
-		docID, e := graphimport.DocIDFor(graphPath)
+		docID, e := graphimport.DocIDFor(graphPath, repoName(dir))
 		if e != nil {
 			fail("resolve doc id: %v", e)
 		}
@@ -290,7 +290,7 @@ func runRefresh(arg string) {
 			fail("purge %s: %v", docID, e)
 		}
 		fmt.Printf("[purge] %s — removed %d chunks, %d graph nodes\n", docID, embN, nodeN)
-		st, e := graphimport.Import(ctx, store, graphPath)
+		st, e := graphimport.Import(ctx, store, graphPath, repoName(dir), loadDomain(cfg).Vocabulary.Code)
 		if e != nil {
 			fail("import graph: %v", e)
 		}
@@ -521,7 +521,7 @@ func runImportGraph(path string) {
 		fail("open knowledge: %v", err)
 	}
 	defer store.Close()
-	st, err := graphimport.Import(context.Background(), store, path)
+	st, err := graphimport.Import(context.Background(), store, path, repoName(filepath.Dir(path)), loadDomain(cfg).Vocabulary.Code)
 	if err != nil {
 		fail("import graph: %v", err)
 	}
@@ -592,7 +592,7 @@ func runSalvage(arg string) {
 		fail("open knowledge: %v", err)
 	}
 	defer store.Close()
-	st, err := graphimport.Import(context.Background(), store, merged)
+	st, err := graphimport.Import(context.Background(), store, merged, repoName(filepath.Dir(merged)), loadDomain(cfg).Vocabulary.Code)
 	if err != nil {
 		fail("import salvaged graph: %v", err)
 	}
@@ -797,4 +797,22 @@ func optionalRelationTypes(cfg config.Config) []string {
 func fail(format string, a ...interface{}) {
 	fmt.Fprintf(os.Stderr, format+"\n", a...)
 	os.Exit(1)
+}
+
+// repoName is the namespace every node id from a graph gets prefixed with.
+//
+// It is the directory the sources live in, with the graph's own output folder
+// stripped: a graph is written to <repo>/.understand-anything/, and naming the
+// repo ".understand-anything" would give every repo the same namespace, which
+// is the collision this exists to prevent.
+func repoName(dir string) string {
+	clean := filepath.Clean(dir)
+	if filepath.Base(clean) == ".understand-anything" {
+		clean = filepath.Dir(clean)
+	}
+	name := filepath.Base(clean)
+	if name == "." || name == string(filepath.Separator) {
+		return "repo"
+	}
+	return strings.TrimSuffix(name, ".git")
 }

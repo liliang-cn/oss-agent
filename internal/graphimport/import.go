@@ -1,8 +1,22 @@
 // Package graphimport loads an Understand-Anything knowledge-graph.json into the
-// cortexdb knowledge base, faithfully: node summaries become semantic vectors;
-// nodes/edges become the ontology graph (with filePath/tags/complexity on nodes
-// and weight/direction on edges); and the architecture layers + guided tour are
+// cortexdb knowledge base: node summaries become semantic vectors; nodes/edges
+// become the ontology graph; and the architecture layers + guided tour are
 // imported as their own nodes with membership edges.
+//
+// It is not a faithful copy. Three things upstream produces are deliberately not
+// carried across, each because taking it at face value would put a claim in the
+// graph that nothing behind it supports:
+//
+//   - Node ids are namespaced by repo. Upstream's own agent instructions forbid
+//     including the project name, so every repo yields `file:src/index.ts`.
+//   - Edge weight is dropped. It is a constant the extraction prompt dictates
+//     (implements is always 0.9), so it measures nothing.
+//   - Edge and node types are checked against the domain's code vocabulary, and
+//     a file containing any undeclared type is refused whole.
+//
+// Every edge also carries the resolution it was derived at, because upstream's
+// `calls` and `implements` are name matching over a parse tree — for Go, which
+// satisfies interfaces implicitly and structurally, `implements` is a guess.
 package graphimport
 
 import (
@@ -11,9 +25,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
+	"github.com/liliang-cn/oss-agent/internal/domain"
 	"github.com/liliang-cn/oss-agent/internal/knowledge"
 )
 
@@ -70,9 +84,14 @@ type Stats struct {
 const batchSize = 64
 
 // DocIDFor returns the document_id that Import uses for a knowledge-graph.json
-// (so callers can purge the prior import before re-importing). It is "ua:<name>",
-// where name is the graph's name field or the file basename.
-func DocIDFor(path string) (string, error) {
+// (so callers can purge the prior import before re-importing). It is
+// "ua:<repo>:<name>", where name is the graph's name field or the file basename.
+//
+// The repo is part of the id for the same reason it is part of every node id:
+// two repos analysed by the same tool produce the same graph name often enough
+// (both "src", both "main") that sharing a document id would make re-importing
+// one silently purge the other.
+func DocIDFor(path, repo string) (string, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("read %s: %w", path, err)
@@ -85,30 +104,21 @@ func DocIDFor(path string) (string, error) {
 	if name == "" {
 		name = strings.TrimSuffix(filepath.Base(path), ".json")
 	}
-	return "ua:" + name, nil
+	return "ua:" + repo + ":" + name, nil
 }
 
-// Import reads a knowledge-graph.json and loads it (faithfully) into the store.
-func Import(ctx context.Context, store *knowledge.Store, path string) (Stats, error) {
+// Import reads a knowledge-graph.json, validates it against the domain's code
+// vocabulary, and loads it into the store. Nothing is written unless the whole
+// file is admissible — see RejectedError for why refusing beats skipping.
+func Import(ctx context.Context, store *knowledge.Store, path, repo string, vocab domain.CodeVocabulary) (Stats, error) {
 	var st Stats
-	b, err := os.ReadFile(path)
+	p, err := Plan(path, repo, vocab)
 	if err != nil {
-		return st, fmt.Errorf("read %s: %w", path, err)
+		return st, err
 	}
-	var g graph
-	if err := json.Unmarshal(b, &g); err != nil {
-		return st, fmt.Errorf("parse graph: %w", err)
-	}
-	name := g.Name
-	if name == "" {
-		name = strings.TrimSuffix(filepath.Base(path), ".json")
-	}
-	docID := "ua:" + name
 
-	var ents []knowledge.GraphEntity
-	var rels []knowledge.GraphRelation
+	sharedMeta := map[string]string{"document_id": p.DocID, "source": "understand", "repo": repo}
 	batch := make(map[string]string, batchSize)
-	sharedMeta := map[string]string{"document_id": docID, "source": "understand"}
 	flush := func() error {
 		if len(batch) == 0 {
 			return nil
@@ -119,97 +129,35 @@ func Import(ctx context.Context, store *knowledge.Store, path string) (Stats, er
 		batch = make(map[string]string, batchSize)
 		return nil
 	}
-	add := func(id, text string) error {
+	for id, text := range p.Embed {
 		batch[id] = text
 		if len(batch) >= batchSize {
-			return flush()
+			if err := flush(); err != nil {
+				return st, fmt.Errorf("embed: %w", err)
+			}
 		}
-		return nil
 	}
-
-	// 1. code nodes → vectors + entities (with full metadata)
-	for _, n := range g.Nodes {
-		if n.ID == "" {
-			continue
-		}
-		text := n.Name
-		if n.Summary != "" {
-			text += "\n" + n.Summary
-		}
-		if err := add(n.ID, text); err != nil {
-			return st, fmt.Errorf("embed: %w", err)
-		}
-		meta := map[string]string{}
-		if n.FilePath != "" {
-			meta["file_path"] = n.FilePath
-		}
-		if len(n.Tags) > 0 {
-			meta["tags"] = strings.Join(n.Tags, ",")
-		}
-		if n.Complexity != "" {
-			meta["complexity"] = n.Complexity
-		}
-		ents = append(ents, knowledge.GraphEntity{
-			ID: n.ID, Name: n.Name, Type: n.Type, Description: n.Summary,
-			Metadata: meta, ChunkIDs: []string{n.ID},
-		})
-		st.Nodes++
-	}
-
-	// 2. architecture layers → entities + membership edges
-	for _, l := range g.Layers {
-		if l.ID == "" {
-			continue
-		}
-		if err := add(l.ID, l.Name+"\n"+l.Description); err != nil {
-			return st, fmt.Errorf("embed layer: %w", err)
-		}
-		ents = append(ents, knowledge.GraphEntity{
-			ID: l.ID, Name: l.Name, Type: "layer", Description: l.Description, ChunkIDs: []string{l.ID},
-		})
-		for _, nid := range l.NodeIDs {
-			rels = append(rels, knowledge.GraphRelation{From: l.ID, To: nid, Type: "layer_contains"})
-		}
-		st.Layers++
-	}
-
-	// 3. guided tour → entities + coverage edges
-	for _, t := range g.Tour {
-		tid := fmt.Sprintf("tour:%d", t.Order)
-		if err := add(tid, t.Title+"\n"+t.Description); err != nil {
-			return st, fmt.Errorf("embed tour: %w", err)
-		}
-		ents = append(ents, knowledge.GraphEntity{
-			ID: tid, Name: t.Title, Type: "tour_step", Description: t.Description,
-			Metadata: map[string]string{"order": strconv.Itoa(t.Order)}, ChunkIDs: []string{tid},
-		})
-		for _, nid := range t.NodeIDs {
-			rels = append(rels, knowledge.GraphRelation{From: tid, To: nid, Type: "tour_covers"})
-		}
-		st.TourSteps++
-	}
-
 	if err := flush(); err != nil {
 		return st, fmt.Errorf("embed batch: %w", err)
 	}
-	if err := store.UpsertEntities(ctx, docID, ents); err != nil {
+
+	if err := store.UpsertEntities(ctx, p.DocID, p.Entities); err != nil {
 		return st, fmt.Errorf("upsert entities: %w", err)
 	}
-
-	// 4. code edges (with weight + direction)
-	for _, e := range g.Edges {
-		if e.Source == "" || e.Target == "" {
-			continue
-		}
-		var meta map[string]string
-		if e.Direction != "" {
-			meta = map[string]string{"direction": e.Direction}
-		}
-		rels = append(rels, knowledge.GraphRelation{From: e.Source, To: e.Target, Type: e.Type, Weight: e.Weight, Metadata: meta})
-		st.Edges++
-	}
-	if err := store.UpsertRelations(ctx, docID, rels); err != nil {
+	if err := store.UpsertRelations(ctx, p.DocID, p.Relations); err != nil {
 		return st, fmt.Errorf("upsert relations: %w", err)
 	}
+
+	for _, e := range p.Entities {
+		switch e.Type {
+		case "layer":
+			st.Layers++
+		case "tour_step":
+			st.TourSteps++
+		default:
+			st.Nodes++
+		}
+	}
+	st.Edges = len(p.Relations)
 	return st, nil
 }

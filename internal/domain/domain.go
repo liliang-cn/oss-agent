@@ -30,8 +30,75 @@ type Domain struct {
 	Repos            []string          `toml:"repos"`           // upstream repos to ingest
 	RedLines         []safety.RuleSpec `toml:"red_lines"`       // deterministic destructive-command blocks
 
+	// Vocabulary holds vocabularies that are NOT the prose one above.
+	Vocabulary Vocabulary `toml:"vocabulary"`
+
 	// ErrorPatterns are compiled from ErrorPatternsRaw at load time.
 	ErrorPatterns []*regexp.Regexp `toml:"-"`
+}
+
+// Vocabulary partitions the ontology vocabulary by where its edges come from.
+//
+// The fields above (EntityTypes/RelationTypes) are the PROSE vocabulary: an LLM
+// reads documentation and emits Cluster, Node, DEPLOYED_ON. They are pasted
+// into the extractor's prompt ("Use ONLY these entity types"), which is exactly
+// why a code vocabulary cannot live there — telling a prose extractor it may
+// emit `function` and `calls` invites it to invent code structure out of
+// documentation.
+//
+// A code vocabulary is produced by a deterministic extractor instead, and is
+// consumed by the importer as an admission filter. Different provenance,
+// different consumer, different list.
+type Vocabulary struct {
+	Code CodeVocabulary `toml:"code"`
+}
+
+// Resolution says how far an extractor got toward meaning.
+const (
+	// ResolutionSyntactic is name matching over a parse tree. It cannot decide
+	// which of two same-named methods a call reaches, and for Go it cannot
+	// derive `implements` at all, because interface satisfaction is implicit
+	// and structural.
+	ResolutionSyntactic = "syntactic"
+	// ResolutionTyped is backed by a type checker (go/types and friends), so an
+	// edge names the symbol it actually resolves to.
+	ResolutionTyped = "typed"
+)
+
+// CodeVocabulary is the admission list for edges mined from source.
+type CodeVocabulary struct {
+	EntityTypes   []string `toml:"entity_types"`
+	RelationTypes []string `toml:"relation_types"`
+	// Resolution defaults to syntactic, because that is what a parse-tree
+	// extractor can honestly claim. Declaring `typed` is a promise about the
+	// producer, not a wish.
+	Resolution string `toml:"resolution"`
+}
+
+// AllowsCodeRelation reports whether the code vocabulary declares this edge type.
+//
+// Deliberately case-sensitive. The prose vocabulary shouts (CONTAINS,
+// DEPENDS_ON) and the code vocabulary whispers (contains, depends_on); a
+// case-insensitive compare would merge "a cluster contains a node" with "a file
+// contains a function". Those share a word and nothing else, and a graph that
+// conflates them answers "what is inside this?" with both at once.
+func (d *Domain) AllowsCodeRelation(t string) bool {
+	for _, declared := range d.Vocabulary.Code.RelationTypes {
+		if declared == t {
+			return true
+		}
+	}
+	return false
+}
+
+// AllowsCodeEntity reports whether the code vocabulary declares this node type.
+func (d *Domain) AllowsCodeEntity(t string) bool {
+	for _, declared := range d.Vocabulary.Code.EntityTypes {
+		if declared == t {
+			return true
+		}
+	}
+	return false
 }
 
 // SourceGroup is one named thing to mine out of source files.
@@ -77,6 +144,14 @@ func Load(path string) (*Domain, error) {
 	}
 	if d.Title == "" {
 		d.Title = d.Name
+	}
+	switch d.Vocabulary.Code.Resolution {
+	case "":
+		d.Vocabulary.Code.Resolution = ResolutionSyntactic
+	case ResolutionSyntactic, ResolutionTyped:
+	default:
+		return nil, fmt.Errorf("domain %q: vocabulary.code resolution %q must be %q or %q",
+			path, d.Vocabulary.Code.Resolution, ResolutionSyntactic, ResolutionTyped)
 	}
 	for _, p := range d.ErrorPatternsRaw {
 		re, err := regexp.Compile(p)
