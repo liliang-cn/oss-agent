@@ -1,8 +1,12 @@
 package knowledge
 
 import (
+	"context"
+	"path/filepath"
 	"reflect"
 	"testing"
+
+	cortexdb "github.com/liliang-cn/cortexdb/v2/pkg/cortexdb"
 )
 
 // A live SDS knowledge base carried a "StorageClass" node type the domain never
@@ -115,5 +119,56 @@ func TestWithOntologyTrimsAndDedupes(t *testing.T) {
 	}
 	if want := []string{"contains"}; !reflect.DeepEqual(s.relationTypes, want) {
 		t.Errorf("relationTypes = %v, want %v", s.relationTypes, want)
+	}
+}
+
+// Registering the ontology must never stop the graph from being written to.
+//
+// It did. An ACTIVE cortexdb schema is validated on every entity upsert, and
+// the schema declares a primary key property the LLM extractor does not emit,
+// so every entity in every document was refused with "missing primary key
+// property id". Ingest reported success throughout — IngestSemantic discarded
+// both the extraction error and the upsert error — and a live knowledge base
+// took 264 new chunks without gaining a single graph node.
+//
+// The registration exists to record the vocabulary and give DriftReport a
+// baseline. That needs the schema stored, not enforced.
+func TestRegisteringTheOntologyDoesNotBlockEntityWrites(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "k.db"), "http://127.0.0.1:1/v1", "x", "none", 8,
+		WithOntology("test", []string{"Gateway", "Node"}, []string{"contains", "backs"}))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	if _, err := s.tb.UpsertEntities(context.Background(), cortexdb.ToolUpsertEntitiesRequest{
+		DocumentID: "d1",
+		Entities: []cortexdb.ToolEntityInput{
+			{Name: "nfs-gw", Type: "Gateway", Description: "an extracted entity, with no id property"},
+		},
+	}); err != nil {
+		t.Fatalf("upsert refused after registering the ontology: %v", err)
+	}
+}
+
+// The schema must be stored even though it is not enforced — that record is the
+// entire point of registering it.
+func TestOntologyIsStoredButNotActive(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "k.db"), "http://127.0.0.1:1/v1", "x", "none", 8,
+		WithOntology("test", []string{"Gateway"}, []string{"contains"}))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	got, err := s.db.GetOntologySchema(context.Background(), cortexdb.OntologyGetRequest{SchemaID: ontologySchemaID})
+	if err != nil {
+		t.Fatalf("the schema must be retrievable: %v", err)
+	}
+	if got.Schema.Active {
+		t.Error("the schema must not be active: cortexdb enforces an active schema on every upsert")
+	}
+	if got.Schema.Metadata["vocabulary_fingerprint"] == "" {
+		t.Error("the fingerprint is what makes a graph traceable to a vocabulary")
 	}
 }

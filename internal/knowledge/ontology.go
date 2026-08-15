@@ -146,8 +146,21 @@ func (s *Store) registerOntology(ctx context.Context) error {
 	if name == "" {
 		name = "oss-agent domain"
 	}
+	// NOT activated. An ACTIVE cortexdb schema is enforced on every entity
+	// upsert, and the enforcement is stricter than anything this schema can
+	// honestly promise: it demands each entity carry the primary key property
+	// the object type declares, which an LLM extractor does not produce. Turning
+	// it on froze every graph write on a live deployment — silently, because
+	// IngestSemantic discards both the extraction error and the upsert error, so
+	// the graph simply stopped growing while ingest kept reporting success.
+	//
+	// What this registration is for is the record: a versioned, fingerprinted
+	// statement of the vocabulary a graph was extracted under, and a baseline
+	// for DriftReport. That needs the schema stored, not enforced. Enforcement
+	// becomes meaningful when the extractor emits keyed entities and a domain
+	// can express link ends; until then, activating it only breaks ingest.
 	_, err := s.db.SaveOntologySchema(ctx, cortexdb.OntologySaveRequest{
-		Activate: true,
+		Deactivate: true,
 		Schema: cortexdb.OntologySchema{
 			SchemaID:    ontologySchemaID,
 			Name:        name,

@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unicode"
 
 	"github.com/liliang-cn/cortexdb/v2/pkg/core"
@@ -62,6 +63,34 @@ func pruneByRelevance(in []core.ScoredEmbedding, ratio float64, n int) []core.Sc
 // ingest. The gateway permits ~10 concurrent requests; sequential extraction is
 // otherwise the dominant ingest cost.
 const extractConcurrency = 10
+
+// Extraction and upsert are best-effort by design — a knowledge base that
+// refuses to ingest because an LLM hiccuped is worse than one with a thinner
+// graph. What is NOT acceptable is doing it silently, which is how a live
+// deployment's graph stopped growing for hours while every ingest reported
+// success. These make the first failure of each kind audible and keep a count
+// for anyone who asks afterwards.
+var (
+	extractFailures atomic.Int64
+	upsertFailures  atomic.Int64
+	extractLogged   atomic.Bool
+	upsertLogged    atomic.Bool
+)
+
+// logOnce prints the first occurrence only. One line names the problem; one per
+// chunk would bury it under itself.
+func logOnce(flag *atomic.Bool, format string, args ...any) {
+	if flag.CompareAndSwap(false, true) {
+		log.Printf(format, args...)
+	}
+}
+
+// IngestFailures reports how many ontology extractions and graph writes have
+// failed since start. Zero extraction failures with a graph that is not growing
+// means the writes are being refused, not the model.
+func IngestFailures() (extraction, upsert int64) {
+	return extractFailures.Load(), upsertFailures.Load()
+}
 
 // Store is the GraphRAG knowledge base.
 type Store struct {
@@ -836,7 +865,16 @@ func (s *Store) IngestSemantic(ctx context.Context, docID, title, content string
 			defer func() { <-sem }()
 			tr, err := ex.Extract(ctx, text)
 			if err != nil || tr == nil {
-				return // extraction is best-effort; never fail ingest on it
+				// Best-effort, but NOT silent. Discarding this made a live
+				// deployment's graph stop growing entirely while ingest kept
+				// reporting success: every chunk was embedded, every entity was
+				// refused, and nothing anywhere said so. One line per document
+				// is enough to notice; the caller still gets its vectors.
+				if err != nil {
+					extractFailures.Add(1)
+					logOnce(&extractLogged, "[ossagent] knowledge: ontology extraction failed for %s, storing vectors only: %v", id, err)
+				}
+				return
 			}
 			mu.Lock()
 			frags = append(frags, frag{id, tr})
@@ -854,7 +892,15 @@ func (s *Store) IngestSemantic(ctx context.Context, docID, title, content string
 			}
 		}
 		if len(ents) > 0 {
-			_, _ = s.tb.UpsertEntities(ctx, cortexdb.ToolUpsertEntitiesRequest{DocumentID: docID, Entities: ents})
+			// Same rule as the extraction above, and the same incident: an
+			// ACTIVE cortexdb ontology schema validates every upsert, and one
+			// registered with a primary key the extractor does not emit refused
+			// every entity in the graph. The write failing is not a reason to
+			// fail ingest; it is a reason to say something.
+			if _, err := s.tb.UpsertEntities(ctx, cortexdb.ToolUpsertEntitiesRequest{DocumentID: docID, Entities: ents}); err != nil {
+				upsertFailures.Add(1)
+				logOnce(&upsertLogged, "[ossagent] knowledge: storing extracted entities failed for %s, the graph will not grow: %v", docID, err)
+			}
 		}
 		var rels []cortexdb.ToolRelationInput
 		for _, r := range f.tr.Relations {
@@ -863,7 +909,10 @@ func (s *Store) IngestSemantic(ctx context.Context, docID, title, content string
 			}
 		}
 		if len(rels) > 0 {
-			_, _ = s.tb.UpsertRelations(ctx, cortexdb.ToolUpsertRelationsRequest{DocumentID: docID, Relations: rels})
+			if _, err := s.tb.UpsertRelations(ctx, cortexdb.ToolUpsertRelationsRequest{DocumentID: docID, Relations: rels}); err != nil {
+				upsertFailures.Add(1)
+				logOnce(&upsertLogged, "[ossagent] knowledge: storing extracted relations failed for %s, the graph will not be walkable: %v", docID, err)
+			}
 		}
 	}
 	return nil
