@@ -322,3 +322,46 @@ func TestTrailingSegment(t *testing.T) {
 		}
 	}
 }
+
+// A server that declares readOnlyHint settles the question; the name heuristic
+// is only for servers that declare nothing. Deciding by name alone is what
+// rejected sds-mcp's own read-only tools whose subject contained a verb.
+func TestAnnotationBeatsTheNameHeuristic(t *testing.T) {
+	readOnly := &sdkmcp.Tool{
+		Name:        "sds_ha_promoter_status",
+		Annotations: &sdkmcp.ToolAnnotations{ReadOnlyHint: true},
+	}
+	if !readOnlyAdmitTool("sds_ha_promoter_status", readOnly, nil) {
+		t.Error("a declared read-only tool must be admitted")
+	}
+
+	// A name that looks read-only but is declared nothing falls through to the
+	// heuristic, which admits it on the trailing verb.
+	if !readOnlyAdmitTool("sds_resource_list", &sdkmcp.Tool{Name: "sds_resource_list"}, nil) {
+		t.Error("an unannotated list tool must still be admitted by name")
+	}
+
+	// Unannotated and mutating stays refused.
+	if readOnlyAdmitTool("sds_resource_delete", &sdkmcp.Tool{Name: "sds_resource_delete"}, nil) {
+		t.Error("an unannotated mutating tool must stay refused")
+	}
+}
+
+// The allowlist is the operator's override and outranks the server's own
+// annotation in both directions.
+func TestAllowlistOutranksTheAnnotation(t *testing.T) {
+	declaredRO := &sdkmcp.Tool{Name: "sds_resource_list", Annotations: &sdkmcp.ToolAnnotations{ReadOnlyHint: true}}
+	if readOnlyAdmitTool("sds_resource_list", declaredRO, []string{"something_else"}) {
+		t.Error("with an allowlist, a name outside it must be refused even if declared read-only")
+	}
+	if !readOnlyAdmitTool("sds_resource_create", nil, []string{"sds_resource_create"}) {
+		t.Error("an allowlisted name must be admitted")
+	}
+}
+
+// A nil tool must not panic; it just means there is nothing declared to read.
+func TestAdmitToolHandlesAMissingTool(t *testing.T) {
+	if !readOnlyAdmitTool("sds_node_list", nil, nil) {
+		t.Error("a nil tool should fall through to the name heuristic")
+	}
+}

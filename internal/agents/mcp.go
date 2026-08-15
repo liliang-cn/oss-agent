@@ -75,7 +75,7 @@ func MountMCP(ctx context.Context, svc *agent.Service, specs []MCPSpec) ([]*mcp.
 		clients = append(clients, client)
 
 		for name, tool := range client.GetTools() {
-			if spec.ReadOnly && !readOnlyAdmit(name, spec.ReadOnlyToolAllow) {
+			if spec.ReadOnly && !readOnlyAdmitTool(name, tool, spec.ReadOnlyToolAllow) {
 				st.Skipped++
 				continue
 			}
@@ -144,6 +144,31 @@ func registerMCPTool(svc *agent.Service, client *mcp.Client, server, name string
 		return
 	}
 	svc.AddTool(name, desc, toParams(tool.InputSchema), handler)
+}
+
+// readOnlyAdmitTool decides whether a tool may be mounted under ReadOnly,
+// preferring what the server DECLARED over what its name looks like.
+//
+// MCP publishes a readOnlyHint for exactly this question, and a server knows
+// whether its own tool mutates anything — no name heuristic can beat that. The
+// heuristic stays for the servers that publish nothing, which is most of them.
+//
+// Only a hint of TRUE is acted on. The wire format omits a false hint, so an
+// unannotated tool and one explicitly marked "not read-only" arrive
+// identically; treating that as a declaration would hand the heuristic's job to
+// an absence. Falling through costs nothing, since the heuristic refuses
+// mutating names anyway.
+//
+// The allowlist wins over both: it is the operator's override, and overriding a
+// server's own annotation is a deliberate act.
+func readOnlyAdmitTool(name string, tool *sdkmcp.Tool, allow []string) bool {
+	if len(allow) > 0 {
+		return readOnlyAdmit(name, allow)
+	}
+	if tool != nil && tool.Annotations != nil && tool.Annotations.ReadOnlyHint {
+		return true
+	}
+	return readOnlyAdmit(name, nil)
 }
 
 // readOnlyAdmit decides whether a tool may be mounted under ReadOnly.

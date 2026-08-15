@@ -49,6 +49,10 @@ type (
 	Domain = domain.Domain
 	// Hit is a retrieved knowledge chunk.
 	Hit = knowledge.Hit
+	// Inventory describes what the knowledge base holds. See Agent.Inventory.
+	Inventory = knowledge.Inventory
+	// SourceInfo is one ingested document's footprint.
+	SourceInfo = knowledge.SourceInfo
 	// Verdict is the red-line wall's ruling on a command.
 	Verdict = safety.Verdict
 	// LogReport is the result of triaging a log file/dir/archive.
@@ -318,6 +322,17 @@ func (a *Agent) Refresh(ctx context.Context, dir string) (IngestStats, error) {
 	return ingest.Repo(ctx, a.store, dir, sourceName(dir), a.dom, a.extract)
 }
 
+// Inventory reports what the knowledge base holds: which documents were
+// ingested, how many chunks and graph entities they produced, and the vector
+// width the index was actually built at.
+//
+// The dimension is read back from the index rather than from configuration
+// because those two disagreeing is a real failure mode with no other symptom:
+// point the agent at a new embedder and every search quietly returns nothing.
+func (a *Agent) Inventory(ctx context.Context) (*Inventory, error) {
+	return a.store.Inventory(ctx)
+}
+
 // PurgeSource removes a source's chunks (and derived graph nodes/edges). match is a
 // document id, or its prefix when prefix is true. Returns the counts removed.
 func (a *Agent) PurgeSource(ctx context.Context, match string, prefix bool) (chunks, nodes int, err error) {
@@ -362,19 +377,33 @@ type Event struct {
 	Suggestion *Suggestion // set only for EventSuggestion
 }
 
-// Stream runs a question and delivers Events to on as they happen (tool calls,
-// answer deltas, …). It returns the full answer (with a deterministic Sources
-// footer appended when the model didn't cite) and the sources retrieved this turn.
+// Stream runs a question in the conversation identified by sessionID and
+// delivers Events to on as they happen (tool calls, answer deltas, …). It
+// returns the full answer (with a deterministic Sources footer appended when the
+// model didn't cite) and the sources retrieved this turn.
+//
+// sessionID is what makes a follow-up a follow-up. Streaming used to drop it,
+// so every turn of a streaming UI started from nothing: ask why a resource
+// degraded, then ask "so how do I fix it", and the agent no longer knew what
+// "it" was. Chat carried a session and Stream did not, which meant the mode a
+// chat sidebar actually uses was the one without memory.
+//
+// An empty sessionID runs the turn with no history, which is what a one-shot
+// caller wants and what Ask does.
 //
 // The model sometimes streams a short preamble, then delivers the real answer via
 // its completion tool; when that happens Stream emits an EventReset before the
 // authoritative answer so a UI can clear the preamble.
-func (a *Agent) Stream(ctx context.Context, question string, on func(Event)) (answer string, sources []string, err error) {
+func (a *Agent) Stream(ctx context.Context, sessionID, question string, on func(Event)) (answer string, sources []string, err error) {
 	dbg := debugEnabled()
 	if dbg {
-		log.Printf("[ossagent] ▶ turn start: question=%q (maxToolRounds=%d, mcp_servers=%d)", truncate(question, 300), maxToolRounds, len(a.mcp))
+		log.Printf("[ossagent] ▶ turn start: session=%q question=%q (maxToolRounds=%d, mcp_servers=%d)", sessionID, truncate(question, 300), maxToolRounds, len(a.mcp))
 	}
-	events, err := a.svc.RunStreamWithOptions(ctx, question, agent.WithMaxTurns(maxToolRounds))
+	opts := []agent.RunOption{agent.WithMaxTurns(maxToolRounds)}
+	if sessionID != "" {
+		opts = append(opts, agent.WithSessionID(sessionID))
+	}
+	events, err := a.svc.RunStreamWithOptions(ctx, question, opts...)
 	if err != nil {
 		if dbg {
 			log.Printf("[ossagent] ✗ RunStream error: %v", err)

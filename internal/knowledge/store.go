@@ -14,8 +14,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/liliang-cn/cortexdb/v2/pkg/cortexdb"
 	"github.com/liliang-cn/cortexdb/v2/pkg/core"
+	"github.com/liliang-cn/cortexdb/v2/pkg/cortexdb"
 
 	"github.com/liliang-cn/oss-agent/internal/extract"
 )
@@ -721,4 +721,77 @@ func (s *Store) UpsertRelations(ctx context.Context, docID string, rels []GraphR
 	}
 	_, err := s.tb.UpsertRelations(ctx, cortexdb.ToolUpsertRelationsRequest{DocumentID: docID, Relations: in})
 	return err
+}
+
+// Inventory is what the knowledge base actually holds.
+//
+// Nothing exposed the contents before: there was IngestDoc, IngestDir, Refresh,
+// PurgeSource and Search, so the only way to answer "did that ingest land?" or
+// "what is in here?" was to open the SQLite file by hand. That is a poor answer
+// for an operator who has just rebuilt an index and needs to know what to
+// re-feed, and a worse one after an embedder change, when a stale-dimension
+// index looks identical from the outside until a search silently returns
+// nothing.
+type Inventory struct {
+	// Sources are the ingested documents, largest first.
+	Sources []SourceInfo
+	// Chunks is the total number of embedded chunks across every source.
+	Chunks int
+	// Nodes and Edges size the extracted knowledge graph.
+	Nodes int
+	Edges int
+	// Dim is the width of a stored vector, read back from the index rather
+	// than from configuration — a mismatch with the configured embedder is
+	// exactly the failure this is meant to expose.
+	Dim int
+}
+
+// SourceInfo is one ingested document's footprint.
+type SourceInfo struct {
+	DocumentID string
+	Chunks     int
+	Bytes      int
+}
+
+// Inventory reports what has been ingested. It reads the index, not the config.
+func (s *Store) Inventory(ctx context.Context) (*Inventory, error) {
+	sqldb := s.db.SQL()
+	inv := &Inventory{Sources: []SourceInfo{}}
+
+	rows, err := sqldb.QueryContext(ctx, `
+		SELECT COALESCE(json_extract(metadata,'$.document_id'), id) AS doc,
+		       COUNT(*), COALESCE(SUM(LENGTH(content)), 0)
+		FROM embeddings
+		GROUP BY doc
+		ORDER BY COUNT(*) DESC, doc`)
+	if err != nil {
+		return nil, fmt.Errorf("inventory sources: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var si SourceInfo
+		if err := rows.Scan(&si.DocumentID, &si.Chunks, &si.Bytes); err != nil {
+			return nil, err
+		}
+		inv.Sources = append(inv.Sources, si)
+		inv.Chunks += si.Chunks
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// A missing graph table is not an error: a store that has only ever had
+	// documents ingested without entity extraction has none.
+	_ = sqldb.QueryRowContext(ctx, `SELECT COUNT(*) FROM graph_nodes`).Scan(&inv.Nodes)
+	_ = sqldb.QueryRowContext(ctx, `SELECT COUNT(*) FROM graph_edges`).Scan(&inv.Edges)
+
+	// Vectors are float32 with a small header; the width is what matters, and
+	// reading it back is the only way to catch an index built at another
+	// embedder's dimension.
+	var vecBytes int
+	if err := sqldb.QueryRowContext(ctx,
+		`SELECT LENGTH(vector) FROM embeddings LIMIT 1`).Scan(&vecBytes); err == nil {
+		inv.Dim = vecBytes / 4
+	}
+	return inv, nil
 }

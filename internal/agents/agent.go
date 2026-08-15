@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/liliang-cn/agent-go/v3/pkg/agent"
@@ -233,6 +234,7 @@ func registerKnowledgeSearch(svc *agent.Service, store *knowledge.Store) {
 		},
 		"required": []string{"query"},
 	}
+	empties := 0
 	svc.AddTool("knowledge_search",
 		"Search the GraphRAG knowledge base (code, docs, recovery procedures, source error strings). "+
 			"Returns the top hits plus related code reached one hop along the knowledge graph "+
@@ -256,14 +258,55 @@ func registerKnowledgeSearch(svc *agent.Service, store *knowledge.Store) {
 					"entities": h.Entities,
 				})
 			}
+			if len(hits) == 0 {
+				// A miss must not look like a success with an empty list, and
+				// must NOT carry the citation hint. Returning ok plus "cite
+				// each grounded statement" for zero hits is what taught the
+				// model to keep rephrasing the query and then answer from its
+				// own memory in citation format — an ungrounded answer wearing
+				// the shape of a grounded one, which is worse than a refusal
+				// because it reads as sourced.
+				empties++
+				out := map[string]interface{}{
+					"ok":    true,
+					"hits":  hits,
+					"found": false,
+					"instruction": "The knowledge base has nothing on this. Do NOT answer from memory as " +
+						"though it were documented, and do not write a Sources section: say plainly that " +
+						"the knowledge base does not cover it, then answer only from what you can observe " +
+						"with the other tools, or say you do not know.",
+				}
+				if empties >= maxEmptySearches {
+					// Rephrasing does not conjure documents that were never
+					// ingested. Five near-identical misses in one turn is a
+					// pattern worth stopping, not repeating.
+					out["instruction"] = "The knowledge base has returned nothing for " +
+						strconv.Itoa(empties) + " consecutive queries. Stop searching it — rewording " +
+						"will not find documents that were never ingested. Say the knowledge base does " +
+						"not cover this, then rely on the other tools or say you do not know."
+					out["stop_searching"] = true
+				}
+				return out, nil
+			}
+			empties = 0
 			return map[string]interface{}{
 				"ok":                true,
 				"hits":              hits,
+				"found":             true,
 				"related_via_graph": gr.Neighbors,
 				"citation_hint":     "Cite each grounded statement inline with the hit's [cite] label; list the labels you used under a final Sources section.",
 			}, nil
 		})
 }
+
+// maxEmptySearches is how many consecutive fruitless knowledge_search calls are
+// tolerated before the tool tells the model to stop.
+//
+// The counter lives with the tool rather than with the run: an Agent runs one
+// turn at a time by contract, and the only cost of a count carried across turns
+// is that a still-empty knowledge base gives up sooner — which is the right
+// answer anyway. Any search that finds something resets it.
+const maxEmptySearches = 3
 
 // registerProbes wires each read-only diagnostic command as an agent tool.
 func registerProbes(svc *agent.Service, list []probes.Probe, filter *safety.Filter) {

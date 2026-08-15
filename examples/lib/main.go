@@ -48,7 +48,7 @@ func main() {
 
 	// 3) Stream a grounded answer, printing tool calls live.
 	fmt.Println("--- answer ---")
-	_, sources, err := a.Stream(context.Background(), question, func(e ossagent.Event) {
+	_, sources, err := a.Stream(context.Background(), "", question, func(e ossagent.Event) {
 		switch e.Kind {
 		case ossagent.EventToolCall:
 			fmt.Printf("\n[tool %s %v]\n", e.Tool, e.Args)
