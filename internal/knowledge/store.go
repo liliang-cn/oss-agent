@@ -6,6 +6,7 @@ package knowledge
 import (
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -785,13 +786,16 @@ func (s *Store) Inventory(ctx context.Context) (*Inventory, error) {
 	_ = sqldb.QueryRowContext(ctx, `SELECT COUNT(*) FROM graph_nodes`).Scan(&inv.Nodes)
 	_ = sqldb.QueryRowContext(ctx, `SELECT COUNT(*) FROM graph_edges`).Scan(&inv.Edges)
 
-	// Vectors are float32 with a small header; the width is what matters, and
-	// reading it back is the only way to catch an index built at another
-	// embedder's dimension.
-	var vecBytes int
+	// cortexdb encodes a vector as an int32 length followed by that many
+	// float32s, so the first four bytes ARE the dimension — read it rather
+	// than deriving it from the blob length, which would be off by the header
+	// and report 769 for a 768-wide index. Reading it back from the index is
+	// the whole point: a mismatch with the configured embedder has no other
+	// symptom than every search quietly returning nothing.
+	var head []byte
 	if err := sqldb.QueryRowContext(ctx,
-		`SELECT LENGTH(vector) FROM embeddings LIMIT 1`).Scan(&vecBytes); err == nil {
-		inv.Dim = vecBytes / 4
+		`SELECT SUBSTR(vector, 1, 4) FROM embeddings LIMIT 1`).Scan(&head); err == nil && len(head) == 4 {
+		inv.Dim = int(binary.LittleEndian.Uint32(head))
 	}
 	return inv, nil
 }
