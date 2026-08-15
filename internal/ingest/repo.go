@@ -28,7 +28,16 @@ type Stats struct {
 }
 
 var docExts = map[string]bool{".md": true, ".adoc": true, ".asciidoc": true, ".rst": true, ".txt": true}
-var codeExts = map[string]bool{".c": true, ".h": true, ".cpp": true, ".cc": true, ".java": true}
+
+// codeExts are the sources worth mining for the message literals an operator
+// actually sees in a log. The list was C and Java only, which silently excluded
+// every Go project — including domains whose own error_patterns name Go
+// constructs (zap, logger, fmt.Errorf). A pattern that can never reach a file
+// is a pattern that does nothing.
+var codeExts = map[string]bool{
+	".c": true, ".h": true, ".cpp": true, ".cc": true, ".java": true,
+	".go": true, ".rs": true, ".py": true, ".ts": true, ".js": true,
+}
 var skipDirs = map[string]bool{".git": true, "node_modules": true, "vendor": true, "build": true, "target": true, ".github": true}
 
 const maxFileBytes = 512 * 1024 // skip very large files

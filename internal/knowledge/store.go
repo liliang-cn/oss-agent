@@ -232,6 +232,9 @@ var codeEdgeTypes = []string{"calls", "contains", "depends_on", "inherits", "imp
 const (
 	graphNeighborsPerSeed = 6  // cap neighbors pulled per seed hit
 	graphNeighborsTotal   = 12 // overall cap on neighbors returned
+	// maxNeighborsPerType stops one entity type from crowding out every other.
+	// Three of twelve leaves room for four kinds of answer.
+	maxNeighborsPerType = 3
 )
 
 // SearchGraph runs hybrid retrieval, then expands one hop along the domain's
@@ -325,7 +328,15 @@ func (s *Store) SearchGraph(ctx context.Context, query string, topK int) (*Graph
 		}
 	}
 
+	// No single entity type may take the whole budget. The neighbours come back
+	// in the graph's own order, so a type the corpus is dense in — a doc listing
+	// six service IPs puts six VIPs one hop from anything gateway-shaped — filled
+	// half the twelve slots with addresses while the packages and services the
+	// question was actually about queued behind them. Capping per type costs
+	// nothing when the neighbourhood is varied and is the whole difference when
+	// it is not.
 	seen := make(map[string]struct{})
+	perType := make(map[string]int)
 	for _, n := range exp.Nodes {
 		if n == nil || n.ID == "" {
 			continue
@@ -336,7 +347,11 @@ func (s *Store) SearchGraph(ctx context.Context, query string, topK int) (*Graph
 		if _, dup := seen[n.ID]; dup {
 			continue
 		}
+		if perType[n.NodeType] >= maxNeighborsPerType {
+			continue
+		}
 		seen[n.ID] = struct{}{}
+		perType[n.NodeType]++
 		nb := Neighbor{ID: n.ID, Type: n.NodeType, Via: via[n.ID], Name: n.Content}
 		if p := n.Properties; p != nil {
 			if v, ok := p["name"].(string); ok && v != "" {
