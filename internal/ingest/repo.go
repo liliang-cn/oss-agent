@@ -83,30 +83,43 @@ func Repo(ctx context.Context, store *knowledge.Store, root, repoName string, do
 			return nil
 		}
 
-		// source file → mine error/log strings
+		// Source file → mine each declared group separately. One document per
+		// group, not one per file: a question about types should retrieve types
+		// rather than compete for the same chunk with a list of log strings.
 		st.CodeFiles++
-		msgs := extractErrorStrings(string(b), dom.ErrorPatterns)
-		if len(msgs) == 0 {
-			return nil
+		for _, g := range dom.SourceGroups() {
+			vals := extractMatches(string(b), g.Compiled, g.MinLength)
+			if len(vals) == 0 {
+				continue
+			}
+			content := fmt.Sprintf("%s %s (%s):\n\n- %s",
+				g.Summary, rel, repoName, strings.Join(vals, "\n- "))
+			docID := id + "#" + g.Name
+			title := fmt.Sprintf("%s: %s (%s)", repoName, rel, g.Name)
+			if e := store.IngestSemantic(ctx, docID, title, content, ex); e != nil {
+				return fmt.Errorf("ingest %s of %s: %w", g.Name, rel, e)
+			}
+			st.ErrorStrings += len(vals)
 		}
-		content := fmt.Sprintf("Error and log messages emitted by %s (%s):\n\n- %s",
-			rel, repoName, strings.Join(msgs, "\n- "))
-		if e := store.IngestSemantic(ctx, id+"#errors", repoName+": "+rel+" (error strings)", content, ex); e != nil {
-			return fmt.Errorf("ingest error strings %s: %w", rel, e)
-		}
-		st.ErrorStrings += len(msgs)
 		return nil
 	})
 	return st, err
 }
 
-// extractErrorStrings returns the de-duplicated message literals in src.
-func extractErrorStrings(src string, patterns []*regexp.Regexp) []string {
+// extractMatches returns the de-duplicated group-1 captures in src, dropping
+// anything shorter than minLen.
+func extractMatches(src string, patterns []*regexp.Regexp, minLen int) []string {
+	if minLen <= 0 {
+		minLen = 3
+	}
 	seen := map[string]bool{}
 	for _, re := range patterns {
 		for _, m := range re.FindAllStringSubmatch(src, -1) {
+			if len(m) < 2 {
+				continue
+			}
 			msg := strings.TrimSpace(m[1])
-			if len(msg) >= 8 && !seen[msg] {
+			if len(msg) >= minLen && !seen[msg] {
 				seen[msg] = true
 			}
 		}
