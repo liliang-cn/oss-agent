@@ -57,7 +57,7 @@ the draft** — especially `[[red_lines]]` (the destructive-command safety wall)
 |---|---|
 | `name` / `title` | engine label / UI brand |
 | `persona` | the agent's system prompt (who it is, how to answer, safety posture) |
-| `entity_types` / `relation_types` | the domain ontology vocabulary (used by extraction + graph) |
+| `entity_types` / `relation_types` | the domain ontology vocabulary. Declare it: `relation_types` is both what extraction may emit and what retrieval traverses, so a domain without one gets a graph whose edges nothing follows |
 | `error_patterns` | regexes (group 1 = message) for log triage |
 | `[[probes]]` | read-only diagnostic commands the agent may run |
 | `repos` | upstream repos to ingest |

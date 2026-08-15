@@ -337,7 +337,8 @@ func runServe(openUI bool) {
 		defer svc.Close()
 	} else {
 		fmt.Fprintln(os.Stderr, "warning: OSS_LLM_API_KEY not set — serving search-only (no /ask, /diagnose)")
-		store, err = knowledge.Open(cfg.KnowledgeDBPath, cfg.EmbBaseURL, cfg.EmbAPIKey, cfg.EmbModel, cfg.EmbDim)
+		store, err = knowledge.Open(cfg.KnowledgeDBPath, cfg.EmbBaseURL, cfg.EmbAPIKey, cfg.EmbModel, cfg.EmbDim,
+			knowledge.WithRelationTypes(dom.RelationTypes))
 		if err != nil {
 			fail("open knowledge: %v", err)
 		}
@@ -676,7 +677,8 @@ func runSearchGraph(query string) {
 		fail("usage: oss-agent search-graph <query>")
 	}
 	cfg := config.Load()
-	store, err := knowledge.Open(cfg.KnowledgeDBPath, cfg.EmbBaseURL, cfg.EmbAPIKey, cfg.EmbModel, cfg.EmbDim)
+	store, err := knowledge.Open(cfg.KnowledgeDBPath, cfg.EmbBaseURL, cfg.EmbAPIKey, cfg.EmbModel, cfg.EmbDim,
+		knowledge.WithRelationTypes(optionalRelationTypes(cfg)))
 	if err != nil {
 		fail("open knowledge: %v", err)
 	}
@@ -777,6 +779,18 @@ func loadDomain(cfg config.Config) *domain.Domain {
 		fail("%v\n  set OSS_DOMAIN_FILE to your product's domain.toml (see examples/example/domain.toml)", err)
 	}
 	return d
+}
+
+// optionalRelationTypes reads the domain's edge vocabulary for the commands that
+// query an already-built index. Those have never needed a domain.toml to run —
+// inspecting an index you were handed is a legitimate thing to do — so a missing
+// or broken one costs the graph filter its vocabulary, not the command its life.
+func optionalRelationTypes(cfg config.Config) []string {
+	d, err := domain.Load(cfg.DomainFile)
+	if err != nil {
+		return nil
+	}
+	return d.RelationTypes
 }
 
 func fail(format string, a ...interface{}) {

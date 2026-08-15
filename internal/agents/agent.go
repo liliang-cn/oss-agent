@@ -73,7 +73,11 @@ func Build(cfg config.Config, dom *domain.Domain) (*agent.Service, *knowledge.St
 		return nil, nil, fmt.Errorf("init embedder: %w", err)
 	}
 
-	store, err := knowledge.Open(cfg.KnowledgeDBPath, cfg.EmbBaseURL, cfg.EmbAPIKey, cfg.EmbModel, cfg.EmbDim)
+	// The domain's relation vocabulary is what retrieval-time graph expansion
+	// traverses: the edges in the graph are the ones extraction was told to
+	// produce, so the whitelist has to come from the same declaration.
+	store, err := knowledge.Open(cfg.KnowledgeDBPath, cfg.EmbBaseURL, cfg.EmbAPIKey, cfg.EmbModel, cfg.EmbDim,
+		knowledge.WithRelationTypes(dom.RelationTypes))
 	if err != nil {
 		return nil, nil, fmt.Errorf("open knowledge: %w", err)
 	}
@@ -237,8 +241,9 @@ func registerKnowledgeSearch(svc *agent.Service, store *knowledge.Store) {
 	empties := 0
 	svc.AddTool("knowledge_search",
 		"Search the GraphRAG knowledge base (code, docs, recovery procedures, source error strings). "+
-			"Returns the top hits plus related code reached one hop along the knowledge graph "+
-			"(calls/contains/depends_on/… edges), so call sites and implementations come together.",
+			"Returns the top hits plus what is one hop away along the knowledge graph (the domain's "+
+			"own relations, or code edges when it declares none), so a symptom arrives with the "+
+			"things it is connected to.",
 		params,
 		func(ctx context.Context, args map[string]interface{}) (interface{}, error) {
 			query, _ := args["query"].(string)

@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -64,11 +65,72 @@ const extractConcurrency = 10
 type Store struct {
 	db *cortexdb.DB
 	tb *cortexdb.GraphRAGToolbox
+
+	// domainEdgeTypes is the ontology vocabulary the active domain declared,
+	// case-widened by caseVariants. Empty when the domain declared none.
+	domainEdgeTypes []string
+}
+
+// Option customizes a Store at Open time.
+type Option func(*Store)
+
+// WithRelationTypes points graph expansion at the relation vocabulary the domain
+// declares in its domain.toml.
+//
+// Without it expansion follows codeEdgeTypes, which is a code-navigation
+// vocabulary — calls, inherits, implements. An ops knowledge base extracted from
+// prose has no edges of that shape at all, so every edge ingest produced was
+// filtered out at query time and GraphRAG quietly degraded to plain vector
+// search. Nothing failed and nothing logged; the graph was simply never walked.
+func WithRelationTypes(types []string) Option {
+	return func(s *Store) { s.domainEdgeTypes = caseVariants(types) }
+}
+
+// caseVariants returns each type as declared plus its upper- and lower-cased
+// forms. cortexdb's traversal filter compares edge types with plain string
+// equality, and the edge type in the graph is whatever the extracting LLM
+// emitted, which follows the declared casing only approximately. Widening what
+// we PASS keeps the tolerance on our side of the dependency rather than
+// loosening cortexdb's filter for everyone.
+func caseVariants(types []string) []string {
+	out := make([]string, 0, len(types)*3)
+	for _, t := range types {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		out = append(out, t, strings.ToUpper(t), strings.ToLower(t))
+	}
+	return dedupe(out)
+}
+
+// dedupe drops repeated entries, preserving first-seen order.
+func dedupe(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	out := in[:0:0]
+	for _, s := range in {
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
+// expandEdgeTypes is the whitelist retrieval-time expansion traverses: the
+// domain's own relation vocabulary when it declared one, otherwise the
+// code-navigation fallback, so a domain with no ontology behaves as before.
+func (s *Store) expandEdgeTypes() []string {
+	if len(s.domainEdgeTypes) > 0 {
+		return s.domainEdgeTypes
+	}
+	return codeEdgeTypes
 }
 
 // Open opens (creating if needed) the knowledge DB at path, using the given
 // OpenAI-compatible embedder config.
-func Open(dbPath, embBaseURL, embAPIKey, embModel string, embDim int) (*Store, error) {
+func Open(dbPath, embBaseURL, embAPIKey, embModel string, embDim int, opts ...Option) (*Store, error) {
 	if dir := filepath.Dir(dbPath); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, fmt.Errorf("create db dir: %w", err)
@@ -79,7 +141,11 @@ func Open(dbPath, embBaseURL, embAPIKey, embModel string, embDim int) (*Store, e
 	if err != nil {
 		return nil, fmt.Errorf("open cortexdb: %w", err)
 	}
-	return &Store{db: db, tb: db.GraphRAGTools()}, nil
+	s := &Store{db: db, tb: db.GraphRAGTools()}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s, nil
 }
 
 // Close releases the database.
@@ -144,7 +210,8 @@ type GraphResult struct {
 }
 
 // codeEdgeTypes are the behavioral/structural edges worth following during
-// expansion. We skip imports/exports (too many, low signal) and the navigational
+// expansion of a domain that declares no relation vocabulary of its own. We skip
+// imports/exports (too many, low signal) and the navigational
 // layer_contains/tour_covers/mentions edges.
 var codeEdgeTypes = []string{"calls", "contains", "depends_on", "inherits", "implements", "triggers", "deploys", "related"}
 
@@ -153,7 +220,7 @@ const (
 	graphNeighborsTotal   = 12 // overall cap on neighbors returned
 )
 
-// SearchGraph runs hybrid retrieval, then expands one hop along code-semantic
+// SearchGraph runs hybrid retrieval, then expands one hop along the domain's
 // edges from the retrieved nodes, returning the hits plus their graph neighbors
 // (deduped, seed-excluded, capped). Doc/blog chunks that aren't graph nodes
 // simply contribute no neighbors.
@@ -202,11 +269,15 @@ func (s *Store) SearchGraph(ctx context.Context, query string, topK int) (*Graph
 	exp, err := s.tb.ExpandGraph(ctx, cortexdb.ToolExpandGraphRequest{
 		NodeIDs:   seeds,
 		MaxHops:   1,
-		EdgeTypes: codeEdgeTypes,
+		EdgeTypes: s.expandEdgeTypes(),
 		Limit:     graphNeighborsPerSeed,
 	})
 	if err != nil {
 		// expansion is best-effort: fall back to plain hits rather than failing.
+		// It is still worth a line, because the only symptom of a graph that is
+		// never walked is an answer that is merely a little thinner than it
+		// should be — which nobody notices.
+		log.Printf("[ossagent] knowledge: graph expansion failed, answering from vector hits only: %v", err)
 		return res, nil
 	}
 
@@ -329,10 +400,23 @@ const graphViewMaxNodes = 60
 // graphExploreEdgeTypes widens expansion for the explorer to include the
 // uppercase DOMAIN relations (from LLM ontology extraction) alongside the code
 // edges, so concept subgraphs (ResourceGroup ─CONTAINS→ Resource) are traversed.
+// The uppercase names here were transcribed from one product's ontology before
+// domains could supply their own; exploreEdgeTypes adds whatever the active
+// domain declares so a second product is not invisible in the explorer.
 var graphExploreEdgeTypes = append(append([]string{}, codeEdgeTypes...),
 	"CONTAINS", "MANAGES", "DEPLOYED_ON", "DEPENDS_ON", "RESOLVES",
 	"DEFINED_IN", "TRIGGERED_BY", "MUTUALLY_EXCLUSIVE", "TRIGGERED_IN_STATE",
 	"REFERENCES") // REFERENCES = SQL foreign keys (object model from schema import)
+
+// exploreEdgeTypes is the explorer's whitelist. Unlike retrieval it unions
+// rather than replaces: browsing a graph is meant to show everything reachable,
+// including the imported code and schema edges the domain says nothing about.
+func (s *Store) exploreEdgeTypes() []string {
+	if len(s.domainEdgeTypes) == 0 {
+		return graphExploreEdgeTypes
+	}
+	return dedupe(append(append([]string{}, graphExploreEdgeTypes...), s.domainEdgeTypes...))
+}
 
 // AllGraph returns the entire knowledge graph (all entity nodes + edges) for the
 // full-graph explorer view. Reads directly via SQL since there's no query seed.
@@ -431,7 +515,7 @@ func (s *Store) QueryGraph(ctx context.Context, query string, topK int) (*GraphV
 		seeds = append(seeds, id)
 	}
 	exp, err := s.tb.ExpandGraph(ctx, cortexdb.ToolExpandGraphRequest{
-		NodeIDs: seeds, MaxHops: 1, EdgeTypes: graphExploreEdgeTypes, Limit: 8,
+		NodeIDs: seeds, MaxHops: 1, EdgeTypes: s.exploreEdgeTypes(), Limit: 8,
 	})
 	if err != nil {
 		return nil, err
@@ -442,7 +526,7 @@ func (s *Store) QueryGraph(ctx context.Context, query string, topK int) (*GraphV
 // ExpandNode returns the one-hop neighborhood of a single graph node (click-to-expand).
 func (s *Store) ExpandNode(ctx context.Context, id string) (*GraphView, error) {
 	exp, err := s.tb.ExpandGraph(ctx, cortexdb.ToolExpandGraphRequest{
-		NodeIDs: []string{id}, MaxHops: 1, EdgeTypes: graphExploreEdgeTypes, Limit: 14,
+		NodeIDs: []string{id}, MaxHops: 1, EdgeTypes: s.exploreEdgeTypes(), Limit: 14,
 	})
 	if err != nil {
 		return nil, err
