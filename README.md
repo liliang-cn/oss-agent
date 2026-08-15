@@ -36,8 +36,8 @@ repos/docs ───┘                         └── red-line safety wall (
 - `internal/graphimport` — imports Understand-Anything `knowledge-graph.json`.
 - `internal/ingest` — semantic text ingest for prose docs/skills.
 - `internal/loganalyze` — product-agnostic log triage engine.
-- `internal/agents` — wires the agent-go Agent (tools + lint). PTC off for clean
-  single-answer Q&A.
+- `internal/agents` — wires the agent-go Agent (tools + lint). Plain
+  function-calling, so a question gets one clean answer.
 - `internal/safety` — the red-line filter (regex, severity → unlock-key gate).
 - `internal/extract` — ingest-time LLM ontology extractor (raw LLM, no agent loop).
 

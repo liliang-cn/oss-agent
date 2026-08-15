@@ -20,7 +20,7 @@ import (
 	"strings"
 	"time"
 
-	agentpkg "github.com/liliang-cn/agent-go/v2/pkg/agent"
+	agentpkg "github.com/liliang-cn/agent-go/v3/pkg/agent"
 
 	"github.com/liliang-cn/oss-agent/web"
 

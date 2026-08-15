@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"strings"
 
-	agdomain "github.com/liliang-cn/agent-go/v2/pkg/domain"
+	agdomain "github.com/liliang-cn/agent-go/v3/pkg/domain"
 
 	"github.com/liliang-cn/oss-agent/internal/domain"
 )

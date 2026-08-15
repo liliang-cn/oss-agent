@@ -11,7 +11,7 @@ import (
 	evalgo "github.com/liliang-cn/eval-go"
 	"github.com/liliang-cn/eval-go/llmjudge"
 
-	"github.com/liliang-cn/agent-go/v2/pkg/llm"
+	"github.com/liliang-cn/agent-go/v3/pkg/llm"
 
 	"github.com/liliang-cn/oss-agent/internal/agents"
 	"github.com/liliang-cn/oss-agent/internal/cite"

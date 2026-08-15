@@ -12,9 +12,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/liliang-cn/agent-go/v2/pkg/agent"
-	agdomain "github.com/liliang-cn/agent-go/v2/pkg/domain"
-	"github.com/liliang-cn/agent-go/v2/pkg/providers"
+	"github.com/liliang-cn/agent-go/v3/pkg/agent"
+	agdomain "github.com/liliang-cn/agent-go/v3/pkg/domain"
+	"github.com/liliang-cn/agent-go/v3/pkg/providers"
 
 	"github.com/liliang-cn/oss-agent/internal/cite"
 	"github.com/liliang-cn/oss-agent/internal/config"
@@ -81,17 +81,18 @@ func Build(cfg config.Config, dom *domain.Domain) (*agent.Service, *knowledge.St
 	// don't enable agent-go's separate graph memory here. The embedder is wired in
 	// case skills/RAG use it.
 	//
-	// PTC (Programmatic Tool Calling) is disabled: it makes the model emit code that
-	// calls tools, then splits its reply between a "Return Value" summary and "Logs",
-	// which Text() concatenates into a noisy dump. Plain function-calling still does
-	// iterative ReAct tool use but yields a single clean text answer in FinalResult —
-	// the right shape for an ask/diagnose agent.
+	// There is no PTC switch to set any more. agent-go v2 had Programmatic Tool
+	// Calling — the model emitted code that called tools, then split its reply
+	// between a "Return Value" summary and "Logs", which Text() concatenated into
+	// a noisy dump — and this agent explicitly turned it off. v3 removed the
+	// feature outright, so plain function-calling is now the only mode: still
+	// iterative ReAct tool use, still a single clean text answer in FinalResult,
+	// which is the shape an ask/diagnose agent wants.
 	svc, err := agent.New("oss-agent").
 		WithSystemPrompt(dom.Persona + citationDirective).
 		WithLLM(llm).
 		WithEmbedder(emb).
 		WithSkills(). // loads ~/.agentgo/skills (understand-* codebase-comprehension skills)
-		WithPTC(false).
 		WithDBPath(cfg.DBPath).
 		Build()
 	if err != nil {

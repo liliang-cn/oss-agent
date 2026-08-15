@@ -15,7 +15,7 @@ import (
 	"sort"
 	"strings"
 
-	agdomain "github.com/liliang-cn/agent-go/v2/pkg/domain"
+	agdomain "github.com/liliang-cn/agent-go/v3/pkg/domain"
 )
 
 // draft is the JSON shape we ask the LLM to fill.
