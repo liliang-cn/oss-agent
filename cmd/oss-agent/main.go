@@ -338,7 +338,8 @@ func runServe(openUI bool) {
 	} else {
 		fmt.Fprintln(os.Stderr, "warning: OSS_LLM_API_KEY not set — serving search-only (no /ask, /diagnose)")
 		store, err = knowledge.Open(cfg.KnowledgeDBPath, cfg.EmbBaseURL, cfg.EmbAPIKey, cfg.EmbModel, cfg.EmbDim,
-			knowledge.WithRelationTypes(dom.RelationTypes))
+			knowledge.WithRelationTypes(dom.RelationTypes),
+			knowledge.WithOntology(dom.Name, dom.EntityTypes, dom.RelationTypes))
 		if err != nil {
 			fail("open knowledge: %v", err)
 		}

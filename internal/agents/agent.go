@@ -76,8 +76,13 @@ func Build(cfg config.Config, dom *domain.Domain) (*agent.Service, *knowledge.St
 	// The domain's relation vocabulary is what retrieval-time graph expansion
 	// traverses: the edges in the graph are the ones extraction was told to
 	// produce, so the whitelist has to come from the same declaration.
+	//
+	// The same declaration is registered as a cortexdb ontology schema, so the
+	// graph carries a record of the vocabulary it was extracted under and drift
+	// away from it is measurable rather than something you infer from answers.
 	store, err := knowledge.Open(cfg.KnowledgeDBPath, cfg.EmbBaseURL, cfg.EmbAPIKey, cfg.EmbModel, cfg.EmbDim,
-		knowledge.WithRelationTypes(dom.RelationTypes))
+		knowledge.WithRelationTypes(dom.RelationTypes),
+		knowledge.WithOntology(dom.Name, dom.EntityTypes, dom.RelationTypes))
 	if err != nil {
 		return nil, nil, fmt.Errorf("open knowledge: %w", err)
 	}

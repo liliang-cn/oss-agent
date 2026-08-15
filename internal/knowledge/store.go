@@ -69,6 +69,12 @@ type Store struct {
 	// domainEdgeTypes is the ontology vocabulary the active domain declared,
 	// case-widened by caseVariants. Empty when the domain declared none.
 	domainEdgeTypes []string
+
+	// The declared vocabulary as written, kept for the ontology schema and for
+	// drift reporting. See ontology.go.
+	ontologyName  string
+	entityTypes   []string
+	relationTypes []string
 }
 
 // Option customizes a Store at Open time.
@@ -144,6 +150,12 @@ func Open(dbPath, embBaseURL, embAPIKey, embModel string, embDim int, opts ...Op
 	s := &Store{db: db, tb: db.GraphRAGTools()}
 	for _, opt := range opts {
 		opt(s)
+	}
+	// Best-effort: a knowledge base that cannot record its vocabulary still
+	// ingests and still answers. Losing the record is worth reporting, not
+	// worth refusing to open over.
+	if err := s.registerOntology(context.Background()); err != nil {
+		log.Printf("knowledge: %v", err)
 	}
 	return s, nil
 }
@@ -829,6 +841,12 @@ type Inventory struct {
 	// than from configuration — a mismatch with the configured embedder is
 	// exactly the failure this is meant to expose.
 	Dim int
+	// Drift is how far the graph's types have wandered from the vocabulary the
+	// domain declared. It belongs here for the same reason Dim does: it is a
+	// silent failure with no other symptom. An undeclared edge type is stored
+	// and then never traversed, because expansion filters on the declared
+	// vocabulary — the graph looks populated and expands to nothing.
+	Drift *OntologyDrift
 }
 
 // SourceInfo is one ingested document's footprint.
@@ -880,6 +898,13 @@ func (s *Store) Inventory(ctx context.Context) (*Inventory, error) {
 	if err := sqldb.QueryRowContext(ctx,
 		`SELECT SUBSTR(vector, 1, 4) FROM embeddings LIMIT 1`).Scan(&head); err == nil && len(head) == 4 {
 		inv.Dim = int(binary.LittleEndian.Uint32(head))
+	}
+
+	// Drift is reported, never fatal: an inventory that refuses to answer
+	// because it could not measure drift tells you less than one that answers
+	// without it.
+	if d, err := s.DriftReport(ctx); err == nil {
+		inv.Drift = d
 	}
 	return inv, nil
 }
