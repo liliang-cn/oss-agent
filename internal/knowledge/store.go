@@ -13,8 +13,10 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/liliang-cn/cortexdb/v2/pkg/core"
 	"github.com/liliang-cn/cortexdb/v2/pkg/cortexdb"
@@ -274,6 +276,23 @@ func (s *Store) SearchGraph(ctx context.Context, query string, topK int) (*Graph
 			}
 		}
 	}
+	// The mapping above is right for a CODE knowledge base, where a chunk IS an
+	// entity — "function:pkg/main.c:foo" embedded, the same id in the graph. It
+	// is wrong for prose, which is what an ops knowledge base is: a chunk there
+	// is "corpus/user-guide.md#3" and the entities extracted FROM it are stored
+	// under ids like "entity:19216810410124". Nothing matches, the seed set is
+	// empty of anything the graph contains, and expansion returns no neighbours
+	// at all — GraphRAG degraded to plain vector search, on every query, without
+	// an error. Measured on a live 537-node graph: zero neighbours returned, and
+	// zero no matter which relation vocabulary was passed, which is why fixing
+	// the vocabulary alone changed nothing.
+	//
+	// So also seed by label: the entities the extractor pulled OUT of the chunks
+	// retrieval just returned. QueryGraph already does this, for the reason it
+	// states — extracted concept entities carry no embedding of their own, so
+	// vector search cannot reach them however good the query is.
+	seeds = append(seeds, s.seedsFromHitText(ctx, res.Hits, seedSet)...)
+
 	if len(seeds) == 0 {
 		return res, nil
 	}
@@ -484,6 +503,101 @@ func (s *Store) AllGraph(ctx context.Context) (*GraphView, error) {
 		gv.Edges = append(gv.Edges, GraphViewEdge{Source: from, Target: to, Type: etype})
 	}
 	return gv, erows.Err()
+}
+
+// minSeedLabel is the shortest node label worth matching in chunk text. Two
+// characters match inside ordinary words and would seed the expansion with
+// most of the graph.
+const minSeedLabel = 3
+
+// minSeedLetters is how many letters a label needs before it counts as naming a
+// concept rather than an address.
+const minSeedLetters = 3
+
+// maxTextSeeds caps how many label-matched seeds one query contributes, so a
+// chunk that mentions fifty entities does not expand into the whole graph.
+const maxTextSeeds = 12
+
+// seedsFromHitText returns graph nodes whose label appears in the retrieved
+// chunk text, skipping anything already seeded.
+//
+// Labels are compared case-insensitively against the concatenated hits. A label
+// that is all digits is skipped: those are addresses and version fragments that
+// occur inside longer strings and seed nothing useful.
+func (s *Store) seedsFromHitText(ctx context.Context, hits []Hit, seen map[string]struct{}) []string {
+	if len(hits) == 0 {
+		return nil
+	}
+	var sb strings.Builder
+	for _, h := range hits {
+		sb.WriteString(strings.ToLower(h.Content))
+		sb.WriteByte('\n')
+	}
+	text := sb.String()
+
+	rows, err := s.db.SQL().QueryContext(ctx,
+		`SELECT id, content FROM graph_nodes WHERE LENGTH(content) >= ?`, minSeedLabel)
+	if err != nil {
+		// Best-effort, like the expansion it feeds: a query that cannot seed by
+		// label still answers from its vector hits.
+		log.Printf("[ossagent] knowledge: label seeding failed: %v", err)
+		return nil
+	}
+	defer func() { _ = rows.Close() }()
+
+	type cand struct {
+		id      string
+		letters int
+	}
+	var matched []cand
+	for rows.Next() {
+		var id, label string
+		if err := rows.Scan(&id, &label); err != nil {
+			break
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		l := strings.ToLower(strings.TrimSpace(label))
+		n := letterCount(l)
+		// A label with almost no letters is an address or a version fragment —
+		// "192.168.123.200/24" — not a concept the retrieved text is about.
+		if len(l) < minSeedLabel || n < minSeedLetters {
+			continue
+		}
+		if strings.Contains(text, l) {
+			matched = append(matched, cand{id: id, letters: n})
+		}
+	}
+
+	// Most letters first. Seeding is a substring match, so the generic labels a
+	// corpus repeats everywhere — "Node", "DRBD resource" — match every chunk and
+	// would take the whole cap, seeding the expansion with hubs and returning
+	// their equally generic neighbours. Letter count, rather than raw length,
+	// is the specificity measure: it ranks "sds-cli backup restore" above "Node"
+	// without letting a long CIDR outrank both.
+	sort.SliceStable(matched, func(i, j int) bool { return matched[i].letters > matched[j].letters })
+
+	out := make([]string, 0, maxTextSeeds)
+	for _, c := range matched {
+		if len(out) >= maxTextSeeds {
+			break
+		}
+		seen[c.id] = struct{}{}
+		out = append(out, c.id)
+	}
+	return out
+}
+
+// letterCount is how many Unicode letters a label carries.
+func letterCount(s string) int {
+	n := 0
+	for _, r := range s {
+		if unicode.IsLetter(r) {
+			n++
+		}
+	}
+	return n
 }
 
 // QueryGraph returns a small subgraph seeded by a search query: the matched code
