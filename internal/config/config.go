@@ -38,11 +38,11 @@ func Load() Config {
 	llmBase := env("OSS_LLM_BASE_URL", "https://api.openai.com/v1")
 	llmKey := os.Getenv("OSS_LLM_API_KEY")
 	return Config{
-		LLMBaseURL: llmBase,
-		LLMAPIKey:  llmKey,
-		LLMModel:   env("OSS_LLM_MODEL", "gpt-4o"),
-		EmbBaseURL: env("OSS_EMB_BASE_URL", llmBase),
-		EmbAPIKey:  env("OSS_EMB_API_KEY", llmKey),
+		LLMBaseURL:      llmBase,
+		LLMAPIKey:       llmKey,
+		LLMModel:        env("OSS_LLM_MODEL", "gpt-4o"),
+		EmbBaseURL:      env("OSS_EMB_BASE_URL", llmBase),
+		EmbAPIKey:       env("OSS_EMB_API_KEY", llmKey),
 		EmbModel:        env("OSS_EMB_MODEL", "text-embedding-3-small"),
 		DBPath:          env("OSS_DB_PATH", "./data/oss-agent.db"),
 		KnowledgeDBPath: env("OSS_KNOWLEDGE_DB_PATH", "./data/knowledge.db"),

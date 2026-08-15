@@ -40,18 +40,18 @@ type Group struct {
 	Signature string
 	Severity  string
 	Count     int
-	Files     []string  // distinct files where it occurred
-	Sample    Finding   // a representative occurrence (with context)
+	Files     []string // distinct files where it occurred
+	Sample    Finding  // a representative occurrence (with context)
 }
 
 // Report is the result of analyzing a source.
 type Report struct {
-	Root          string
-	FilesTotal    int
-	FilesScanned  int
-	FilesSkipped  int // binary/oversized/unreadable
-	Findings      int
-	Groups        []Group // ranked: FATAL first, then by count
+	Root         string
+	FilesTotal   int
+	FilesScanned int
+	FilesSkipped int // binary/oversized/unreadable
+	Findings     int
+	Groups       []Group // ranked: FATAL first, then by count
 }
 
 const (

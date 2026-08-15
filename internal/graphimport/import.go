@@ -61,9 +61,9 @@ type graph struct {
 
 // Stats summarizes an import.
 type Stats struct {
-	Nodes    int
-	Edges    int
-	Layers   int
+	Nodes     int
+	Edges     int
+	Layers    int
 	TourSteps int
 }
 
