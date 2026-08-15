@@ -77,15 +77,38 @@ func hasOwnSources(answer string) bool {
 		(strings.Contains(answer, "**Sources") || strings.Contains(answer, "# Sources") || strings.Contains(answer, "## Sources"))
 }
 
-// Footer renders a markdown "Sources" section mapping a bracket label to each
-// source, or "" when there are no sources or the answer already lists its own.
+// Footer renders a markdown "Sources" section for the sources the answer
+// actually cites, or "" when it cites none or already lists its own.
+//
+// It used to list everything retrieved this turn, on the reasoning that a model
+// which forgot to cite should still show its working. That inverts into a lie
+// as soon as retrieval returns something the answer did not use — and retrieval
+// always returns something, because the relevance gate is query-relative and
+// keeps the best chunk however far off topic it is. Asking about a parameter
+// the corpus has never heard of produced a confident answer from the model's
+// own memory with the nearest unrelated document appended underneath it,
+// formatted as a source. An answer that reads as grounded and is not is worse
+// than one that admits it is unsourced, because nobody re-checks a citation.
+//
+// The cost is the case this was built for: a source the model used but did not
+// label goes unlisted. That is a loss of convenience. The other way round is a
+// loss of truth.
 func Footer(answer string, sources []string) string {
 	if len(sources) == 0 || hasOwnSources(answer) {
 		return ""
 	}
+	var used []string
+	for _, s := range sources {
+		if strings.Contains(answer, "["+Label(s)+"]") {
+			used = append(used, s)
+		}
+	}
+	if len(used) == 0 {
+		return ""
+	}
 	var b strings.Builder
 	b.WriteString("\n\n**Sources**\n")
-	for _, s := range sources {
+	for _, s := range used {
 		b.WriteString("- [" + Label(s) + "] " + s + "\n")
 	}
 	return b.String()

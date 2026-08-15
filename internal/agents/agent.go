@@ -289,12 +289,31 @@ func registerKnowledgeSearch(svc *agent.Service, store *knowledge.Store) {
 				return out, nil
 			}
 			empties = 0
+			// Retrieval always returns SOMETHING. The relevance gate is
+			// query-relative by design — raw scores vary several-fold between
+			// queries, so an absolute floor either keeps everything or empties
+			// the result — which means the best chunk survives however far off
+			// topic it is. Ask a question the corpus does not cover and the
+			// nearest unrelated document comes back looking exactly like an
+			// answer, and gets cited as one.
+			//
+			// No threshold can fix that here, so the judgement is handed to the
+			// model, which can actually tell whether a chunk is about the
+			// question. It is told to check, and told what to do when the
+			// answer is no. The instruction is not a suggestion in the persona
+			// — it rides with the evidence it applies to.
 			return map[string]interface{}{
 				"ok":                true,
 				"hits":              hits,
 				"found":             true,
 				"related_via_graph": gr.Neighbors,
-				"citation_hint":     "Cite each grounded statement inline with the hit's [cite] label; list the labels you used under a final Sources section.",
+				"relevance_check": "These are the closest chunks in the corpus, NOT necessarily relevant ones — " +
+					"retrieval always returns its best match even when the corpus does not cover the question. " +
+					"Read them before relying on them. If they are not about what was asked, say the knowledge " +
+					"base does not cover it and do not cite them.",
+				"citation_hint": "Cite ONLY the chunks you actually used, inline with their [cite] label, and list " +
+					"just those labels under a final Sources section. Citing a chunk you did not use claims " +
+					"grounding you do not have.",
 			}, nil
 		})
 }
