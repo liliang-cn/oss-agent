@@ -38,7 +38,25 @@ var codeExts = map[string]bool{
 	".c": true, ".h": true, ".cpp": true, ".cc": true, ".java": true,
 	".go": true, ".rs": true, ".py": true, ".ts": true, ".js": true,
 }
-var skipDirs = map[string]bool{".git": true, "node_modules": true, "vendor": true, "build": true, "target": true, ".github": true}
+
+// skipDirs are directories that hold no operator-facing knowledge. ".claude"
+// earns its place the hard way: its worktrees/ can hold whole duplicate copies
+// of the repository — one audited ingest was 72% worktree copies by file count
+// — and every duplicate chunk is a duplicate retrieval candidate.
+var skipDirs = map[string]bool{
+	".git": true, "node_modules": true, "vendor": true, "build": true,
+	"target": true, ".github": true, ".claude": true, ".understand-anything": true,
+}
+
+// skipFile drops files whose contents are not knowledge: generated code
+// restates the .proto that generated it, thousands of lines at a time, and a
+// test's fmt.Errorf is an assertion message no operator will ever see in a log.
+func skipFile(name string) bool {
+	return strings.HasSuffix(name, ".pb.go") ||
+		strings.HasSuffix(name, ".pb.gw.go") ||
+		strings.HasSuffix(name, "_test.go") ||
+		strings.HasSuffix(name, ".min.js")
+}
 
 const maxFileBytes = 512 * 1024 // skip very large files
 
@@ -54,6 +72,10 @@ func Repo(ctx context.Context, store *knowledge.Store, root, repoName string, do
 			if skipDirs[d.Name()] {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		if skipFile(d.Name()) {
+			st.Skipped++
 			return nil
 		}
 		ext := strings.ToLower(filepath.Ext(d.Name()))

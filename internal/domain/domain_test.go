@@ -11,7 +11,7 @@ import (
 // domain that declares only the old field behaves exactly as before.
 func TestSourceGroupsFoldsInErrorPatterns(t *testing.T) {
 	d := &Domain{ErrorPatternsRaw: []string{`pr_err\("([^"]+)"`}}
-	if err := compileForTest(d); err != nil {
+	if err := compileForTest(d, ""); err != nil {
 		t.Fatal(err)
 	}
 	groups := d.SourceGroups()
@@ -24,55 +24,32 @@ func TestSourceGroupsFoldsInErrorPatterns(t *testing.T) {
 	}
 }
 
-// A domain can now ask for anything its language declares — the types a system
-// defines are its domain model, and mining them puts the ontology's own
-// vocabulary in front of the extractor.
-func TestSourcePatternsAreNamedAndSeparate(t *testing.T) {
-	d := &Domain{
-		ErrorPatternsRaw: []string{`pr_err\("([^"]+)"`},
-		SourcePatterns: []SourceGroup{
-			{Name: "types", Patterns: []string{`type\s+([A-Z]\w+)\s+struct`}},
-		},
-	}
-	if err := compileForTest(d); err != nil {
-		t.Fatal(err)
+// source_patterns is retired: mining types/operations/constants by regex was a
+// degraded tree-sitter, and code structure now arrives as a real graph via
+// ingest-repo (Understand-Anything → graphimport). A domain.toml still carrying
+// the table loads fine — TOML decoding ignores unknown keys — and only its
+// error_patterns are mined.
+func TestSourcePatternsTableIsIgnored(t *testing.T) {
+	d := &Domain{ErrorPatternsRaw: []string{`pr_err\("([^"]+)"`}}
+	if err := compileForTest(d, "\n[[source_patterns]]\nname = \"types\"\npatterns = ['type\\s+([A-Z]\\w+)\\s+struct']\n"); err != nil {
+		t.Fatalf("a domain.toml with a leftover source_patterns table must still load: %v", err)
 	}
 	groups := d.SourceGroups()
-	if len(groups) != 2 {
-		t.Fatalf("groups = %d, want errors + types", len(groups))
-	}
-	types := groups[1]
-	if types.Name != "types" || len(types.Compiled) != 1 {
-		t.Errorf("types group = %+v", types)
-	}
-	if types.Summary == "" {
-		t.Error("a group with no summary must still title its document")
-	}
-	if types.MinLength != 3 {
-		t.Errorf("MinLength = %d, want the default 3 — identifiers are short", types.MinLength)
+	if len(groups) != 1 || groups[0].Name != "errors" {
+		t.Fatalf("groups = %+v, want the errors group alone", groups)
 	}
 }
 
-func TestSourcePatternsRejectAnUnusableGroup(t *testing.T) {
-	if err := compileForTest(&Domain{SourcePatterns: []SourceGroup{{Patterns: []string{"x"}}}}); err == nil {
-		t.Error("a group with no name must be rejected: the name is its document id suffix")
-	}
-	if err := compileForTest(&Domain{SourcePatterns: []SourceGroup{{Name: "t", Patterns: []string{"("}}}}); err == nil {
-		t.Error("an invalid regex must be rejected at load, not silently matched against nothing")
-	}
-}
-
-// compileForTest runs the same compilation Load does, without a file.
-func compileForTest(d *Domain) error {
+// compileForTest runs the same compilation Load does, without a file. extra is
+// appended to the TOML body verbatim.
+func compileForTest(d *Domain, extra string) error {
 	d.Name, d.Persona = "t", "p"
 	tmp := filepath.Join(os.TempDir(), "oss-agent-domain-test.toml")
 	body := "name = \"t\"\npersona = \"p\"\n"
 	for _, p := range d.ErrorPatternsRaw {
 		body += "error_patterns = ['" + p + "']\n"
 	}
-	for _, g := range d.SourcePatterns {
-		body += "\n[[source_patterns]]\nname = \"" + g.Name + "\"\npatterns = ['" + strings.Join(g.Patterns, "','") + "']\n"
-	}
+	body += extra
 	if err := os.WriteFile(tmp, []byte(body), 0o600); err != nil {
 		return err
 	}

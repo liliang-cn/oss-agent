@@ -77,7 +77,9 @@ func trimAll(in []string) []string {
 // name object types.
 const entityInterface = "Entity"
 
-// registerOntology stores the declared vocabulary and activates it.
+// registerOntology stores the declared vocabulary and activates it in
+// vocabulary mode — canonical spellings and interface retrieval, no write
+// gating.
 func (s *Store) registerOntology(ctx context.Context) error {
 	if len(s.entityTypes) == 0 && len(s.relationTypes) == 0 {
 		return nil
@@ -146,24 +148,27 @@ func (s *Store) registerOntology(ctx context.Context) error {
 	if name == "" {
 		name = "oss-agent domain"
 	}
-	// NOT activated. An ACTIVE cortexdb schema is enforced on every entity
-	// upsert, and the enforcement is stricter than anything this schema can
-	// honestly promise: it demands each entity carry the primary key property
-	// the object type declares, which an LLM extractor does not produce. Turning
-	// it on froze every graph write on a live deployment — silently, because
-	// IngestSemantic discards both the extraction error and the upsert error, so
-	// the graph simply stopped growing while ingest kept reporting success.
+	// Activated as a VOCABULARY schema, never a strict one. A strict active
+	// schema is enforced on every entity upsert, and that enforcement demands
+	// what an LLM extractor does not produce — each entity carrying its object
+	// type's primary key. Activating one froze every graph write on a live
+	// deployment, silently, because IngestSemantic discards the upsert error;
+	// the workaround for a while was to register the schema deactivated, which
+	// kept ingest alive at the price of everything activation is for.
 	//
-	// What this registration is for is the record: a versioned, fingerprinted
-	// statement of the vocabulary a graph was extracted under, and a baseline
-	// for DriftReport. That needs the schema stored, not enforced. Enforcement
-	// becomes meaningful when the extractor emits keyed entities and a domain
-	// can express link ends; until then, activating it only breaks ingest.
+	// enforcement=vocabulary (cortexdb ≥2.69) is the resolution: the schema
+	// canonicalizes declared type spellings and powers interface retrieval,
+	// while keyless and undeclared entities — all of LLM extraction, and every
+	// code-graph import — fall back to name-derived ids exactly as if no
+	// schema were active. Same node ids as before activation, so existing
+	// graphs do not fork. The registration doubles as the record: a versioned,
+	// fingerprinted statement of the vocabulary, and the DriftReport baseline.
 	_, err := s.db.SaveOntologySchema(ctx, cortexdb.OntologySaveRequest{
-		Deactivate: true,
+		Activate: true,
 		Schema: cortexdb.OntologySchema{
 			SchemaID:    ontologySchemaID,
 			Name:        name,
+			Enforcement: cortexdb.OntologyEnforcementVocabulary,
 			Description: "Entity and relation vocabulary declared by the active domain.toml.",
 			Metadata: map[string]string{
 				// The fingerprint is what makes a graph traceable to a

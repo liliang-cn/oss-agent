@@ -8,7 +8,6 @@ package domain
 import (
 	"fmt"
 	"regexp"
-	"strings"
 
 	"github.com/BurntSushi/toml"
 
@@ -19,16 +18,15 @@ import (
 // Domain bundles the product-specific knowledge that shapes the agent. It is
 // loaded from a domain.toml; the engine treats it as opaque config.
 type Domain struct {
-	Name             string            `toml:"name"`            // human label
-	Title            string            `toml:"title"`           // UI title/brand (defaults to Name)
-	Persona          string            `toml:"persona"`         // agent system prompt
-	EntityTypes      []string          `toml:"entity_types"`    // ontology node types
-	RelationTypes    []string          `toml:"relation_types"`  // ontology edge types
-	ErrorPatternsRaw []string          `toml:"error_patterns"`  // regex sources (group 1 = message)
-	SourcePatterns   []SourceGroup     `toml:"source_patterns"` // named groups mined from source files
-	Probes           []probes.Probe    `toml:"probes"`          // read-only diagnostic commands
-	Repos            []string          `toml:"repos"`           // upstream repos to ingest
-	RedLines         []safety.RuleSpec `toml:"red_lines"`       // deterministic destructive-command blocks
+	Name             string            `toml:"name"`           // human label
+	Title            string            `toml:"title"`          // UI title/brand (defaults to Name)
+	Persona          string            `toml:"persona"`        // agent system prompt
+	EntityTypes      []string          `toml:"entity_types"`   // ontology node types
+	RelationTypes    []string          `toml:"relation_types"` // ontology edge types
+	ErrorPatternsRaw []string          `toml:"error_patterns"` // regex sources (group 1 = message)
+	Probes           []probes.Probe    `toml:"probes"`         // read-only diagnostic commands
+	Repos            []string          `toml:"repos"`          // upstream repos to ingest
+	RedLines         []safety.RuleSpec `toml:"red_lines"`      // deterministic destructive-command blocks
 
 	// Vocabulary holds vocabularies that are NOT the prose one above.
 	Vocabulary Vocabulary `toml:"vocabulary"`
@@ -103,16 +101,15 @@ func (d *Domain) AllowsCodeEntity(t string) bool {
 
 // SourceGroup is one named thing to mine out of source files.
 //
-// error_patterns answers "what messages does this code print", which is what an
-// operator reading a log needs. It is not the only question a codebase answers.
-// The types a system declares ARE its domain model — a Go project's
-// "type HAResource struct" says what an HA resource is more precisely than any
-// prose about it — and mining them puts the vocabulary the ontology asks for in
-// front of the extractor instead of hoping the docs happened to spell it out.
-//
-// Each group becomes its own document per source file, titled by Summary, so a
-// question about types retrieves types rather than competing with log strings
-// inside one undifferentiated blob.
+// Only one group exists now: error_patterns, folded in by SourceGroups. It
+// answers "what messages does this code print", which is what an operator
+// reading a log needs, and log strings genuinely are not in the AST — a regex
+// is the right tool for them. A configurable source_patterns list used to sit
+// alongside it, mining types/operations/constants by regex; that was a
+// degraded tree-sitter producing flat name lists whose relationships an LLM
+// then had to guess back. Code structure now arrives as a real graph via
+// `ingest-repo` (Understand-Anything → graphimport), so the regex route to it
+// is gone.
 type SourceGroup struct {
 	// Name identifies the group and suffixes the document id
 	// ("pkg/gateway/nfs.go#types").
@@ -160,30 +157,11 @@ func Load(path string) (*Domain, error) {
 		}
 		d.ErrorPatterns = append(d.ErrorPatterns, re)
 	}
-	for i := range d.SourcePatterns {
-		g := &d.SourcePatterns[i]
-		if strings.TrimSpace(g.Name) == "" {
-			return nil, fmt.Errorf("domain %q: source_patterns[%d] needs a name", path, i)
-		}
-		if g.Summary == "" {
-			g.Summary = "Extracted from"
-		}
-		if g.MinLength <= 0 {
-			g.MinLength = 3
-		}
-		for _, raw := range g.Patterns {
-			re, err := regexp.Compile(raw)
-			if err != nil {
-				return nil, fmt.Errorf("domain %q: source_patterns[%q]: invalid pattern %q: %w", path, g.Name, raw, err)
-			}
-			g.Compiled = append(g.Compiled, re)
-		}
-	}
 	return &d, nil
 }
 
-// SourceGroups returns every group to mine, with error_patterns folded in as one
-// so a domain that only declares the old field keeps working unchanged.
+// SourceGroups returns every group to mine from source files — just the
+// error_patterns group. See the SourceGroup comment for why it is alone.
 func (d *Domain) SourceGroups() []SourceGroup {
 	var out []SourceGroup
 	if len(d.ErrorPatterns) > 0 {
@@ -194,5 +172,5 @@ func (d *Domain) SourceGroups() []SourceGroup {
 			MinLength: 8, // a message shorter than this is a fragment, not a line
 		})
 	}
-	return append(out, d.SourcePatterns...)
+	return out
 }

@@ -151,9 +151,14 @@ func TestRegisteringTheOntologyDoesNotBlockEntityWrites(t *testing.T) {
 	}
 }
 
-// The schema must be stored even though it is not enforced — that record is the
-// entire point of registering it.
-func TestOntologyIsStoredButNotActive(t *testing.T) {
+// The schema must be stored AND active — but only in vocabulary mode. Strict
+// activation froze every graph write on a live deployment (an LLM extractor
+// cannot supply primary keys); registering it deactivated was the workaround,
+// which kept ingest alive but gave up canonical spellings and interface
+// retrieval. Vocabulary enforcement is what lets both hold at once, and the
+// first test above — a keyless upsert succeeding with the schema registered —
+// is the proof it does not gate.
+func TestOntologyIsActiveAsVocabulary(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "k.db"), "http://127.0.0.1:1/v1", "x", "none", 8,
 		WithOntology("test", []string{"Gateway"}, []string{"contains"}))
 	if err != nil {
@@ -165,8 +170,11 @@ func TestOntologyIsStoredButNotActive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the schema must be retrievable: %v", err)
 	}
-	if got.Schema.Active {
-		t.Error("the schema must not be active: cortexdb enforces an active schema on every upsert")
+	if !got.Schema.Active {
+		t.Error("the schema must be active: inactive, it canonicalizes nothing and expands no interfaces")
+	}
+	if got.Schema.Enforcement != cortexdb.OntologyEnforcementVocabulary {
+		t.Errorf("enforcement = %q, want vocabulary — strict enforcement refuses every LLM-extracted entity", got.Schema.Enforcement)
 	}
 	if got.Schema.Metadata["vocabulary_fingerprint"] == "" {
 		t.Error("the fingerprint is what makes a graph traceable to a vocabulary")

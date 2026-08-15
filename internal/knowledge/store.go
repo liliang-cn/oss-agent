@@ -6,6 +6,7 @@ package knowledge
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -401,17 +402,26 @@ func (s *Store) SearchGraph(ctx context.Context, query string, topK int) (*Graph
 	return res, nil
 }
 
-// PurgeSource removes every embedding belonging to a source, plus (for code
-// sources) the derived graph entity nodes and — via FK cascade — their edges.
-// The source is identified by its embedding metadata document_id: exact match, or
-// a prefix match (text sources store one document_id per file under "<name>/...").
+// PurgeSource removes every embedding belonging to a source, plus everything
+// the source's documents put in the graph. The source is identified by its
+// embedding metadata document_id: exact match, or a prefix match (text sources
+// store one document_id per file under "<name>/...").
 // Catches deletions too: it enumerates what's actually in the DB, not the source.
+//
+// The graph half goes through cortexdb's DeleteDocumentGraph, which walks the
+// provenance upsert_entities records (source_document_ids on entity nodes,
+// document_id on chunks and relation edges) and detaches — rather than deletes —
+// entities that other documents also assert. The previous implementation
+// guessed entity ids from chunk ids (EntityNodeID(chunkID)); that matched the
+// code-graph convention of the time and nothing else, so purging a prose source
+// deleted its vectors and left its whole subgraph behind — a store audited
+// after a few rebuild cycles was 23% orphan nodes.
 func (s *Store) PurgeSource(ctx context.Context, docMatch string, prefix bool) (embCount, nodeCount int, err error) {
 	sqldb := s.db.SQL()
-	q := `SELECT id FROM embeddings WHERE json_extract(metadata,'$.document_id') = ?`
+	q := `SELECT id, json_extract(metadata,'$.document_id') FROM embeddings WHERE json_extract(metadata,'$.document_id') = ?`
 	arg := docMatch
 	if prefix {
-		q = `SELECT id FROM embeddings WHERE json_extract(metadata,'$.document_id') LIKE ?`
+		q = `SELECT id, json_extract(metadata,'$.document_id') FROM embeddings WHERE json_extract(metadata,'$.document_id') LIKE ?`
 		arg = docMatch + "%"
 	}
 	rows, err := sqldb.QueryContext(ctx, q, arg)
@@ -419,15 +429,24 @@ func (s *Store) PurgeSource(ctx context.Context, docMatch string, prefix bool) (
 		return 0, 0, fmt.Errorf("query source ids: %w", err)
 	}
 	var embIDs []string
-	nodeSet := make(map[string]struct{})
+	docSet := make(map[string]struct{})
+	// The pre-provenance sweep: graphs written before source_document_ids
+	// existed keyed code entity nodes by their chunk id. Kept so a purge still
+	// cleans up a store that predates the provenance upgrade; on new stores
+	// these ids match nothing and the delete counts them as absent, not failed.
+	legacySet := make(map[string]struct{})
 	for rows.Next() {
 		var id string
-		if scanErr := rows.Scan(&id); scanErr != nil {
+		var docID sql.NullString
+		if scanErr := rows.Scan(&id, &docID); scanErr != nil {
 			rows.Close()
 			return 0, 0, scanErr
 		}
 		embIDs = append(embIDs, id)
-		nodeSet[cortexdb.EntityNodeID(id)] = struct{}{}
+		if docID.Valid && docID.String != "" {
+			docSet[docID.String] = struct{}{}
+		}
+		legacySet[cortexdb.EntityNodeID(id)] = struct{}{}
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
@@ -439,15 +458,32 @@ func (s *Store) PurgeSource(ctx context.Context, docMatch string, prefix bool) (
 	if err := s.db.Vector().DeleteBatch(ctx, embIDs); err != nil {
 		return 0, 0, fmt.Errorf("delete embeddings: %w", err)
 	}
-	nodeIDs := make([]string, 0, len(nodeSet))
-	for id := range nodeSet {
-		nodeIDs = append(nodeIDs, id)
+
+	docIDs := make([]string, 0, len(docSet))
+	for id := range docSet {
+		docIDs = append(docIDs, id)
 	}
-	res, derr := s.db.Graph().DeleteNodesBatch(ctx, nodeIDs)
+	sort.Strings(docIDs)
+	for _, docID := range docIDs {
+		resp, derr := s.tb.DeleteDocumentGraph(ctx, cortexdb.ToolDeleteDocumentGraphRequest{DocumentID: docID})
+		if derr != nil {
+			return len(embIDs), nodeCount, fmt.Errorf("delete graph of %s: %w", docID, derr)
+		}
+		nodeCount += resp.EntityNodesDeleted + resp.ChunkNodesDeleted
+		if resp.DocumentNodeDeleted {
+			nodeCount++
+		}
+	}
+
+	legacyIDs := make([]string, 0, len(legacySet))
+	for id := range legacySet {
+		legacyIDs = append(legacyIDs, id)
+	}
+	res, derr := s.db.Graph().DeleteNodesBatch(ctx, legacyIDs)
 	if derr != nil {
-		return len(embIDs), 0, fmt.Errorf("delete graph nodes: %w", derr)
+		return len(embIDs), nodeCount, fmt.Errorf("delete legacy graph nodes: %w", derr)
 	}
-	return len(embIDs), res.SuccessCount, nil
+	return len(embIDs), nodeCount + res.SuccessCount, nil
 }
 
 // ── graph view (for the knowledge-graph explorer UI) ──
