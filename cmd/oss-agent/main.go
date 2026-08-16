@@ -257,7 +257,17 @@ func runIngestCLI(args []string) {
 		fmt.Printf("[purge] %s — removed %d chunks, %d graph nodes\n", docID, embN, nodeN)
 	}
 
-	if err := store.IngestDoc(ctx, docID, name+" command reference", doc); err != nil {
+	// IngestSemantic rather than IngestDoc: the latter delegates chunking to
+	// cortexdb, which merges several help pages into one ~2800-character chunk.
+	// A chunk holding four commands dilutes each one's terms to a quarter of the
+	// text, and the reference then loses every ranking to the code graph's short,
+	// dense node summaries — measured on a live store, "创建 NFS 网关的命令行参数"
+	// stopped retrieving it at all. One command per chunk is the shape that
+	// answers a question about one command.
+	//
+	// No extractor: a help page is syntax, and entities pulled out of flag lists
+	// are not worth an LLM call apiece.
+	if err := store.IngestSemantic(ctx, docID, name+" command reference", doc, nil); err != nil {
 		fail("ingest %s: %v", docID, err)
 	}
 	fmt.Printf("ingested %s — %d commands into %s\n", docID, st.Commands, cfg.KnowledgeDBPath)
