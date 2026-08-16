@@ -35,6 +35,105 @@ var searchReranker = core.NewKeywordMatchReranker(0.3)
 // this fraction of the top chunk's score — a query-relative relevance gate.
 const relevanceFloor = 0.6
 
+// codeSourceShare bounds how much of a result set may come from an imported code
+// graph. Half: enough for a code question to be answered mostly from code, not
+// enough for a code base to answer an operations question on its own.
+const codeSourceShare = 0.5
+
+// isCodeSource reports whether a retrieved chunk came from a code-graph import
+// (`ingest-repo` → graphimport), rather than from prose — runbooks, guides, the
+// incident notes an operator actually needs.
+//
+// Matched on the metadata the importer writes, with the document-id prefix as a
+// fallback for graphs imported before that metadata existed.
+func isCodeSource(meta map[string]string, docID string) bool {
+	return meta["source"] == "understand" || strings.HasPrefix(docID, "ua:")
+}
+
+// recallBySource retrieves prose and code candidates in two separate passes, so
+// that neither can crowd the other out of the candidate pool.
+//
+// One pass with a wider over-fetch is not enough, and the difference is the
+// whole bug. Importing a repository's code graph put ~1000 code nodes against a
+// few hundred prose chunks, and every code node carries a summary written in the
+// runbooks' own vocabulary — DRBD, quorum, promoter — so they score the same and
+// win on count. Measured the day the first repository landed: for "节点断电后资源
+// 没有自动接管" every candidate in the top 24 was code, scoring 0.016, while the
+// runbooks that answer it scored 0.016 too and sat past rank 30. A quota applied
+// after retrieval had nothing to promote, because the prose never reached the
+// pool. Retrieving each source separately is what puts it there.
+//
+// The cost is a second embedding of the query per search. That is the price of
+// an operations answer surviving a code import.
+func (s *Store) recallBySource(ctx context.Context, query string, topK int) (prose, code []core.ScoredEmbedding, err error) {
+	recall := func(wantCode bool) ([]core.ScoredEmbedding, error) {
+		return s.db.HybridSearchTextWithOptions(ctx, query, cortexdb.TextSearchOptions{
+			TopK:     topK,
+			Reranker: searchReranker,
+			// Authorize is cortexdb's retrieval-layer predicate: it over-fetches
+			// internally until TopK candidates pass, which is exactly the
+			// guarantee a post-hoc filter cannot give.
+			Authorize: func(e core.ScoredEmbedding) bool {
+				return isCodeSource(e.Metadata, e.Metadata["document_id"]) == wantCode
+			},
+		})
+	}
+	if prose, err = recall(false); err != nil {
+		return nil, nil, err
+	}
+	if code, err = recall(true); err != nil {
+		return nil, nil, err
+	}
+	return prose, code, nil
+}
+
+// mergeByQuota interleaves the two recalls into one relevance-ordered result of
+// at most n, capping the code share at codeSourceShare.
+//
+// The relevance floor is applied per source rather than globally: "off topic" is
+// a judgement against comparable things, and a global floor computed from a code
+// node's score is what silently deleted the prose tail once code started
+// arriving.
+//
+// The cap is not a penalty on code. With no prose to promote the quota releases
+// and every slot is filled, so a question about the code base is still answered
+// from the code base.
+func mergeByQuota(prose, code []core.ScoredEmbedding, n int) []core.ScoredEmbedding {
+	prose = pruneByRelevance(prose, relevanceFloor, len(prose))
+	code = pruneByRelevance(code, relevanceFloor, len(code))
+
+	codeCap := int(float64(n) * codeSourceShare)
+	if codeCap < 1 {
+		codeCap = 1
+	}
+	if len(prose) == 0 {
+		codeCap = n
+	}
+	if len(code) > codeCap {
+		code = code[:codeCap]
+	}
+
+	out := make([]core.ScoredEmbedding, 0, n)
+	i, j := 0, 0
+	for len(out) < n && (i < len(prose) || j < len(code)) {
+		switch {
+		case j >= len(code):
+			out = append(out, prose[i])
+			i++
+		case i >= len(prose):
+			out = append(out, code[j])
+			j++
+		case prose[i].Score >= code[j].Score:
+			out = append(out, prose[i])
+			i++
+		default:
+			out = append(out, code[j])
+			j++
+		}
+	}
+	return out
+}
+
 // pruneByRelevance drops candidates below relevanceFloor × the best score and caps
 // the result at n, preserving the reranked order. Empty/zero-score inputs pass through.
 func pruneByRelevance(in []core.ScoredEmbedding, ratio float64, n int) []core.ScoredEmbedding {
@@ -281,14 +380,11 @@ func (s *Store) SearchGraph(ctx context.Context, query string, topK int) (*Graph
 	// across queries (and decay smoothly), so an absolute MinScore either keeps
 	// everything or empties the result — a relative floor drops the off-topic tail
 	// without that risk, raising the precision of the agent's context.
-	candidates, err := s.db.HybridSearchTextWithOptions(ctx, query, cortexdb.TextSearchOptions{
-		TopK:     topK * 4, // over-fetch so the floor has a tail to trim
-		Reranker: searchReranker,
-	})
+	prose, code, err := s.recallBySource(ctx, query, topK)
 	if err != nil {
 		return nil, err
 	}
-	results := pruneByRelevance(candidates, relevanceFloor, topK)
+	results := mergeByQuota(prose, code, topK)
 	res := &GraphResult{}
 	// The graph stores nodes under cortexdb-normalized "entity:" ids, while the
 	// embedding/chunk id is the raw node id (e.g. "function:pkg/main.c:foo").
@@ -960,10 +1056,11 @@ func (s *Store) SearchSemantic(ctx context.Context, query string, topK int) ([]H
 	if topK <= 0 {
 		topK = 6
 	}
-	results, err := s.db.HybridSearchText(ctx, query, topK)
+	prose, code, err := s.recallBySource(ctx, query, topK)
 	if err != nil {
 		return nil, err
 	}
+	results := mergeByQuota(prose, code, topK)
 	hits := make([]Hit, 0, len(results))
 	for _, r := range results {
 		docID := r.Metadata["document_id"]
