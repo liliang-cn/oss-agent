@@ -73,6 +73,45 @@ type CodeVocabulary struct {
 	Resolution string `toml:"resolution"`
 }
 
+// The default code vocabulary is Understand-Anything's own type unions
+// (packages/core/src/types.ts, v2.8.x), which is what `ingest-repo` imports.
+//
+// Defaulted rather than required because the importer refuses a whole graph
+// containing any undeclared type: a domain.toml that transcribes these by hand
+// and misses one turns a working import into a total rejection, and there is
+// nothing product-specific about the list to transcribe in the first place. A
+// domain that declares its own list still overrides this completely — narrowing
+// the admission list is a legitimate way to keep a graph small.
+var (
+	defaultCodeEntityTypes = []string{
+		"file", "function", "class", "module", "concept",
+		"config", "document", "service", "table", "endpoint",
+		"pipeline", "schema", "resource",
+		"domain", "flow", "step",
+		"article", "entity", "topic", "claim", "source",
+	}
+	defaultCodeRelationTypes = []string{
+		// structural
+		"imports", "exports", "contains", "inherits", "implements",
+		// behavioral
+		"calls", "subscribes", "publishes", "middleware",
+		// data flow
+		"reads_from", "writes_to", "transforms", "validates",
+		// dependencies
+		"depends_on", "tested_by", "configures",
+		// semantic
+		"related", "similar_to",
+		// infrastructure
+		"deploys", "serves", "provisions", "triggers",
+		// schema/data
+		"migrates", "documents", "routes", "defines_schema",
+		// domain
+		"contains_flow", "flow_step", "cross_domain",
+		// knowledge
+		"cites", "contradicts", "builds_on", "exemplifies", "categorized_under", "authored_by",
+	}
+)
+
 // AllowsCodeRelation reports whether the code vocabulary declares this edge type.
 //
 // Deliberately case-sensitive. The prose vocabulary shouts (CONTAINS,
@@ -149,6 +188,14 @@ func Load(path string) (*Domain, error) {
 	default:
 		return nil, fmt.Errorf("domain %q: vocabulary.code resolution %q must be %q or %q",
 			path, d.Vocabulary.Code.Resolution, ResolutionSyntactic, ResolutionTyped)
+	}
+	// Each list defaults independently: a domain narrowing the node types it
+	// admits should not silently lose the edge types along with them.
+	if len(d.Vocabulary.Code.EntityTypes) == 0 {
+		d.Vocabulary.Code.EntityTypes = append([]string(nil), defaultCodeEntityTypes...)
+	}
+	if len(d.Vocabulary.Code.RelationTypes) == 0 {
+		d.Vocabulary.Code.RelationTypes = append([]string(nil), defaultCodeRelationTypes...)
 	}
 	for _, p := range d.ErrorPatternsRaw {
 		re, err := regexp.Compile(p)

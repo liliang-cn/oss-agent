@@ -163,3 +163,43 @@ func TestAllowsRelationIsCaseSensitive(t *testing.T) {
 		t.Error("undeclared type must be refused")
 	}
 }
+
+// A domain that says nothing about code still admits an Understand-Anything
+// graph. Requiring the list would be a transcription task with a cliff at the
+// end: the importer refuses a whole graph over one undeclared type.
+func TestCodeVocabularyDefaultsToUpstreamUnions(t *testing.T) {
+	d := &Domain{}
+	if err := compileForTest(d, ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"file", "function", "class"} {
+		if !d.AllowsCodeEntity(want) {
+			t.Errorf("default code vocabulary is missing node type %q", want)
+		}
+	}
+	for _, want := range []string{"calls", "imports", "implements", "tested_by"} {
+		if !d.AllowsCodeRelation(want) {
+			t.Errorf("default code vocabulary is missing edge type %q", want)
+		}
+	}
+	if d.Vocabulary.Code.Resolution != ResolutionSyntactic {
+		t.Errorf("resolution = %q, want the honest default %q", d.Vocabulary.Code.Resolution, ResolutionSyntactic)
+	}
+}
+
+// An explicit list replaces the default rather than extending it: narrowing the
+// admission list is how a domain keeps its graph small, and a merge would make
+// that impossible.
+func TestCodeVocabularyExplicitListWins(t *testing.T) {
+	d := &Domain{}
+	extra := "\n[vocabulary.code]\nentity_types = ['file']\nrelation_types = ['contains']\n"
+	if err := compileForTest(d, extra); err != nil {
+		t.Fatal(err)
+	}
+	if !d.AllowsCodeEntity("file") || d.AllowsCodeEntity("function") {
+		t.Errorf("entity types = %v, want exactly [file]", d.Vocabulary.Code.EntityTypes)
+	}
+	if !d.AllowsCodeRelation("contains") || d.AllowsCodeRelation("calls") {
+		t.Errorf("relation types = %v, want exactly [contains]", d.Vocabulary.Code.RelationTypes)
+	}
+}

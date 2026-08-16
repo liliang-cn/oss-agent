@@ -50,6 +50,15 @@ func isCodeSource(meta map[string]string, docID string) bool {
 	return meta["source"] == "understand" || strings.HasPrefix(docID, "ua:")
 }
 
+// IsCodeDocumentID reports whether a document id names an imported code graph.
+//
+// Exported for callers that have only the id — an eval report classifying where
+// each answer's evidence came from, for instance — and should not reimplement
+// the convention.
+func IsCodeDocumentID(docID string) bool {
+	return isCodeSource(nil, docID)
+}
+
 // recallBySource retrieves prose and code candidates in two separate passes, so
 // that neither can crowd the other out of the candidate pool.
 //

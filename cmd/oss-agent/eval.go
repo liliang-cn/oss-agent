@@ -38,6 +38,8 @@ func runEval(args []string) {
 	topK := fs.Int("k", 4, "knowledge chunks retrieved as context per question (matches the agent's knowledge_search)")
 	conc := fs.Int("concurrency", 2, "parallel judge evaluations")
 	failUnder := fs.Float64("fail-under", 0, "exit non-zero if any metric's pass-rate is below this (0 = off)")
+	requireProse := fs.Bool("require-prose", false,
+		"fail any case whose category is \"ops\" that retrieved no prose — guards against an imported code graph answering operational questions")
 	// flag stops at the first positional, so a leading dataset path would swallow
 	// any flags after it. Pull a leading non-flag arg out first so order is free.
 	dsArg := ""
@@ -76,6 +78,7 @@ func runEval(args []string) {
 
 	ctx := context.Background()
 	samples := make([]evalgo.Sample, 0, len(cases))
+	mixes := make([]sourceMix, 0, len(cases))
 	for i, c := range cases {
 		fmt.Fprintf(os.Stderr, "[%d/%d] %s\n", i+1, len(cases), c.Name)
 
@@ -113,6 +116,7 @@ func runEval(args []string) {
 			Context: contexts,
 			Meta:    c.Meta,
 		})
+		mixes = append(mixes, sourceMixOf(c, gr.Hits))
 	}
 
 	suite := evalgo.Suite{
@@ -128,6 +132,7 @@ func runEval(args []string) {
 	}
 	report := suite.Run(ctx)
 	report.WriteConsole(os.Stdout)
+	fmt.Fprint(os.Stdout, formatSourceMix(mixes))
 
 	if *out != "" {
 		f, err := os.Create(*out)
@@ -146,9 +151,84 @@ func runEval(args []string) {
 			}
 		}
 	}
+	if *requireProse {
+		var starved []string
+		for _, m := range mixes {
+			if m.Category == "ops" && m.Prose == 0 {
+				starved = append(starved, m.Name)
+			}
+		}
+		if len(starved) > 0 {
+			fail("%d ops question(s) retrieved no prose at all: %s\n"+
+				"  An imported code graph can outnumber the runbooks and take every slot; the answer\n"+
+				"  stays fluent while its sources change, which no answer-quality metric catches.",
+				len(starved), strings.Join(starved, ", "))
+		}
+	}
 	if report.Failed() {
 		os.Exit(1)
 	}
+}
+
+// sourceMix is where one question's retrieved context came from.
+//
+// The answer-quality metrics above cannot see this: when an imported code graph
+// crowded the runbooks out of a live store, the answers stayed fluent and
+// well-formed — an operational question was simply answered from the struct that
+// models the thing rather than from the runbook that says what to do about it.
+// Only the sources changed, so only the sources reveal it.
+type sourceMix struct {
+	Name     string
+	Category string
+	Code     int
+	Prose    int
+}
+
+func sourceMixOf(c evalCase, hits []knowledge.Hit) sourceMix {
+	m := sourceMix{Name: c.Name, Category: c.Category}
+	for _, h := range hits {
+		if knowledge.IsCodeDocumentID(h.DocumentID) {
+			m.Code++
+			continue
+		}
+		m.Prose++
+	}
+	return m
+}
+
+func formatSourceMix(mixes []sourceMix) string {
+	if len(mixes) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	var code, prose, starved int
+	b.WriteString("\nRetrieved sources (code = imported code graph, prose = docs and runbooks)\n")
+	for _, m := range mixes {
+		code += m.Code
+		prose += m.Prose
+		flag := ""
+		if m.Category == "ops" && m.Prose == 0 {
+			flag = "  <- ops question, no prose"
+			starved++
+		}
+		cat := m.Category
+		if cat == "" {
+			cat = "-"
+		}
+		fmt.Fprintf(&b, "  %-28s %-6s code=%-3d prose=%-3d%s\n", truncate(m.Name, 28), cat, m.Code, m.Prose, flag)
+	}
+	fmt.Fprintf(&b, "  total: code=%d prose=%d\n", code, prose)
+	if starved > 0 {
+		fmt.Fprintf(&b, "  %d ops question(s) retrieved no prose — re-run with -require-prose to fail on this\n", starved)
+	}
+	return b.String()
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n-1] + "…"
 }
 
 func loadEvalDataset(path string) []evalCase {

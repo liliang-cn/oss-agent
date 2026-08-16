@@ -51,6 +51,8 @@ func main() {
 		runAsk(strings.Join(os.Args[2:], " "))
 	case "ingest":
 		runIngest(strings.Join(os.Args[2:], " "))
+	case "ingest-cli":
+		runIngestCLI(os.Args[2:])
 	case "ingest-repo":
 		runIngestRepo(strings.Join(os.Args[2:], " "))
 	case "refresh":
@@ -79,6 +81,10 @@ func main() {
 		runAnalyzeLog(strings.Join(os.Args[2:], " "))
 	case "domain":
 		runDomain()
+	case "export":
+		runExport(os.Args[2:])
+	case "doctor":
+		runDoctor()
 	case "check":
 		runCheck(strings.Join(os.Args[2:], " "))
 	case "eval":
@@ -148,6 +154,119 @@ func runIngest(dir string) {
 		fmt.Printf("ingested %s\n", f)
 	}
 	fmt.Printf("done: %d document(s) into %s\n", len(matches), cfg.KnowledgeDBPath)
+}
+
+// runExport writes the store's documents back out as markdown.
+//
+// Documents written straight into the knowledge base — incident notes added
+// through the UI or API — have no file anywhere, so rebuilding an index destroys
+// them. This is how they get a copy that can live in version control.
+func runExport(args []string) {
+	dir := "export"
+	prefix := ""
+	if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
+		dir = args[0]
+	}
+	if len(args) > 1 {
+		prefix = args[1]
+	}
+	cfg := config.Load()
+	store, err := knowledge.Open(cfg.KnowledgeDBPath, cfg.EmbBaseURL, cfg.EmbAPIKey, cfg.EmbModel, cfg.EmbDim)
+	if err != nil {
+		fail("open knowledge: %v", err)
+	}
+	defer store.Close()
+
+	st, err := store.Export(context.Background(), dir, prefix)
+	if err != nil {
+		fail("export: %v", err)
+	}
+	fmt.Printf("exported %d document(s) to %s\n", st.Documents, dir)
+	if len(st.Skipped) > 0 {
+		fmt.Fprintf(os.Stderr, "  %d document(s) skipped — their ids collide on one filename: %s\n",
+			len(st.Skipped), strings.Join(st.Skipped, ", "))
+	}
+}
+
+// runDoctor reports on the retrieval path rather than the store's contents.
+//
+// Every check corresponds to a failure that produced no error anywhere: an
+// unreachable proxy in front of the embedder, a vector index capping its result
+// set below the requested k, a code graph outnumbering the runbooks. The agent
+// keeps answering through all of them, which is why they need asking about.
+func runDoctor() {
+	cfg := config.Load()
+	store, err := knowledge.Open(cfg.KnowledgeDBPath, cfg.EmbBaseURL, cfg.EmbAPIKey, cfg.EmbModel, cfg.EmbDim)
+	if err != nil {
+		fail("open knowledge: %v", err)
+	}
+	defer store.Close()
+
+	fmt.Printf("knowledge: %s\nembedder:  %s (%s, dim %d)\n\n",
+		cfg.KnowledgeDBPath, cfg.EmbBaseURL, cfg.EmbModel, cfg.EmbDim)
+	d := store.Doctor(context.Background(), cfg.EmbBaseURL)
+	fmt.Print(d.Format())
+	if env := knowledge.ProxyEnvSummary(); env != "" {
+		fmt.Printf("\nproxy environment:\n%s\n", env)
+	}
+	if d.Failed {
+		os.Exit(1)
+	}
+}
+
+// runIngestCLI walks a binary's --help tree and stores it as one document.
+//
+// Architecture comes from the code graph and procedure from the runbooks, but
+// neither carries a flag spelling, so an agent asked for a runnable command
+// assembles one that reads exactly like a correct one and fails on paste. The
+// binary's own help is the only source that cannot drift from the binary.
+//
+// Ingested through the same path as any other document, so `refresh` and the
+// source quota treat it like the prose it is.
+func runIngestCLI(args []string) {
+	if len(args) == 0 {
+		fail("usage: oss-agent ingest-cli <binary> [args-before-subcommands...]\n" +
+			"  e.g. oss-agent ingest-cli /usr/local/bin/sds-cli\n" +
+			"       oss-agent ingest-cli kubectl        (walks every subcommand's --help)")
+	}
+	cfg := config.Load()
+	if cfg.EmbAPIKey == "" {
+		fail("set OSS_EMB_API_KEY (or OSS_LLM_API_KEY) for embeddings")
+	}
+	bin, rest := args[0], args[1:]
+	ctx := context.Background()
+
+	doc, st, err := ingest.CLIHelp(ctx, bin, rest...)
+	if err != nil {
+		fail("walk %s --help: %v", bin, err)
+	}
+	name := filepath.Base(bin)
+	docID := name + "-help"
+
+	store, err := knowledge.Open(cfg.KnowledgeDBPath, cfg.EmbBaseURL, cfg.EmbAPIKey, cfg.EmbModel, cfg.EmbDim)
+	if err != nil {
+		fail("open knowledge: %v", err)
+	}
+	defer store.Close()
+
+	// Purge first: re-running after a CLI change must replace the reference,
+	// not leave the old flags alongside the new ones for retrieval to pick from.
+	if embN, nodeN, perr := store.PurgeSource(ctx, docID, false); perr != nil {
+		fail("purge previous %s: %v", docID, perr)
+	} else if embN > 0 {
+		fmt.Printf("[purge] %s — removed %d chunks, %d graph nodes\n", docID, embN, nodeN)
+	}
+
+	if err := store.IngestDoc(ctx, docID, name+" command reference", doc); err != nil {
+		fail("ingest %s: %v", docID, err)
+	}
+	fmt.Printf("ingested %s — %d commands into %s\n", docID, st.Commands, cfg.KnowledgeDBPath)
+	if len(st.Failed) > 0 {
+		// Named rather than counted: a subcommand that would not run is usually
+		// one that needs an argument, and the operator can tell which.
+		fmt.Fprintf(os.Stderr, "  %d subcommand(s) gave no help: %s\n",
+			len(st.Failed), strings.Join(st.Failed, ", "))
+	}
 }
 
 // runIngestRepo is the one-liner: clone → understand → import. It shallow-clones

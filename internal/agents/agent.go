@@ -99,7 +99,7 @@ func Build(cfg config.Config, dom *domain.Domain) (*agent.Service, *knowledge.St
 	// iterative ReAct tool use, still a single clean text answer in FinalResult,
 	// which is the shape an ask/diagnose agent wants.
 	svc, err := agent.New("oss-agent").
-		WithSystemPrompt(dom.Persona + citationDirective).
+		WithSystemPrompt(dom.Persona + groundingDirective + citationDirective).
 		WithLLM(llm).
 		WithEmbedder(emb).
 		WithSkills(). // loads ~/.agentgo/skills (understand-* codebase-comprehension skills)
@@ -230,6 +230,39 @@ Citations (required — do this every time you use knowledge_search):
 - End the answer with a "Sources" section: one line per label you cited,
   "- [label] full-source". List each source once; only labels that appeared in
   knowledge_search results — never invent one.`
+
+// groundingDirective is appended to every persona, like citationDirective and
+// for the same reason: these two rules are not a property of any one product,
+// and a domain.toml that forgets them produces an agent that is confidently
+// wrong rather than merely unhelpful.
+//
+// Both were written from observed failures on a deployed copilot:
+//
+//   - It searched only for the topics its persona happened to enumerate. Asked
+//     whether adding a second remote channel to a specific host would help, it
+//     searched nothing and recommended the tunnel the knowledge base records as
+//     having already failed there — the host's NIC hangs and takes every channel
+//     over it down, which is exactly the sort of thing a knowledge base holds
+//     and general knowledge does not.
+//   - Asked for the function behind a feature, it invented a plausible name and
+//     file path, then a whole call chain around them. Nothing marked it as a
+//     guess, and the paths do not exist.
+const groundingDirective = `
+
+Grounding (required):
+- Search the knowledge base FIRST, on essentially every question, before
+  answering from what you already know. It is not a reference manual; it is this
+  deployment's own memory: notes about named hosts, what was tried and failed,
+  why a workaround was abandoned. Such notes routinely contradict generic best
+  practice, and a generically correct answer given while one exists is worse than
+  no answer — it sends an operator to repeat a known failure. A question naming a
+  host, a resource, a symptom or a past event is a search, not a recall.
+- NEVER invent an identifier. Function names, file paths, call chains, CLI flags,
+  config keys, API fields: state them only if they appeared in something you
+  retrieved this turn. You cannot read the working tree, so an identifier you did
+  not retrieve is a guess, and a guess formatted as a code reference is
+  indistinguishable from fact until it fails in the operator's hands. When a
+  search comes back empty, say what you searched for and stop.`
 
 // registerKnowledgeSearch exposes the GraphRAG knowledge base as a tool.
 func registerKnowledgeSearch(svc *agent.Service, store *knowledge.Store) {

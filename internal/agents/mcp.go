@@ -51,6 +51,10 @@ const mcpConnectTimeout = 30 * time.Second
 func MountMCP(ctx context.Context, svc *agent.Service, specs []MCPSpec) ([]*mcp.Client, []MCPMountStatus) {
 	var clients []*mcp.Client
 	var statuses []MCPMountStatus
+	// One cache across every server: the key carries the tool name, and two
+	// servers exposing the same tool name are already indistinguishable to the
+	// model, so they should not be distinguished here either.
+	cache := newToolCache()
 
 	for _, spec := range specs {
 		st := MCPMountStatus{Name: spec.Name}
@@ -79,7 +83,7 @@ func MountMCP(ctx context.Context, svc *agent.Service, specs []MCPSpec) ([]*mcp.
 				st.Skipped++
 				continue
 			}
-			registerMCPTool(svc, client, spec.Name, name, tool, spec.ReadOnly)
+			registerMCPTool(svc, client, spec.Name, name, tool, spec.ReadOnly, cache)
 			st.Tools++
 		}
 		statuses = append(statuses, st)
@@ -114,7 +118,7 @@ func serverConfig(spec MCPSpec) *mcp.ServerConfig {
 // registerMCPTool exposes one MCP tool as an agent tool. The handler forwards the
 // call to the MCP server via CallTool; results and errors are returned as plain
 // JSON-safe maps so the existing Stream event path surfaces them unchanged.
-func registerMCPTool(svc *agent.Service, client *mcp.Client, server, name string, tool *sdkmcp.Tool, readOnly bool) {
+func registerMCPTool(svc *agent.Service, client *mcp.Client, server, name string, tool *sdkmcp.Tool, readOnly bool, cache *toolCache) {
 	desc := tool.Description
 	if desc == "" {
 		desc = fmt.Sprintf("Tool %q exposed by MCP server %q.", name, server)
@@ -139,7 +143,12 @@ func registerMCPTool(svc *agent.Service, client *mcp.Client, server, name string
 	// e.g. "*_status" as read-only, so without this a duplicate status poll would
 	// be re-executed instead of collapsed. A ReadOnly tool is also concurrency-safe.
 	if readOnly {
-		svc.AddToolWithMetadata(name, desc, toParams(tool.InputSchema), handler,
+		// Collapsed here as well as flagged upstream: the metadata alone did not
+		// stop a reasoning loop from calling the same list tool four times in one
+		// turn, each a round trip and another copy of the result in the context.
+		// Only read-only tools are wrapped — a cached mutation would report an
+		// effect that did not happen the second time.
+		svc.AddToolWithMetadata(name, desc, toParams(tool.InputSchema), cache.wrap(name, handler),
 			agent.ToolMetadata{ReadOnly: true, ConcurrencySafe: true})
 		return
 	}

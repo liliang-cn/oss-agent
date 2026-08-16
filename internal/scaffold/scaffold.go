@@ -148,7 +148,7 @@ Fill this JSON exactly:
 {
  "name": "human label for the product, e.g. \"Redis (in-memory store)\"",
  "title": "short UI brand, e.g. \"Redis knowledge\"",
- "persona": "the agent's system prompt: who it is (an expert SRE copilot for THIS product), that it reasons step by step (ReAct) and grounds answers via knowledge_search and read-only probes, and a non-negotiable safety section saying a deterministic wall blocks data-destroying commands and that such fixes require explicit operator confirmation. Tailor it to this product.",
+ "persona": "the agent's system prompt: who it is (an expert SRE copilot for THIS product), that it reasons step by step (ReAct) and grounds answers via knowledge_search and read-only probes, and a non-negotiable safety section saying a deterministic wall blocks data-destroying commands and that such fixes require explicit operator confirmation. Tailor it to this product. Do NOT enumerate which topics deserve a knowledge_search — the engine already instructs the agent to search first on every question and never to invent an identifier, and a narrower list in the persona only teaches it to skip the searches the list forgot.",
  "entity_types": ["8-12 domain object types this product reasons about (its nouns)"],
  "relation_types": ["6-10 UPPER_SNAKE relation types between those objects"],
  "error_patterns": ["3-6 Go regexes that capture log/error message text emitted by THIS product's source; group 1 = the message. Match the languages above (e.g. fprintf/log./panic/LOG()). Use double-backslash for regex escapes in JSON."],
